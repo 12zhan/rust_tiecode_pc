@@ -80,12 +80,72 @@ impl EditorCore {
     }
 }
 
+#[derive(Clone, Copy)]
+struct EditorLayout {
+    font_size: Pixels,
+    scroll_offset: Point<Pixels>,
+    last_bounds: Option<Bounds<Pixels>>,
+}
+
+impl EditorLayout {
+    fn new() -> Self {
+        Self {
+            font_size: px(14.0),
+            scroll_offset: point(px(0.0), px(0.0)),
+            last_bounds: None,
+        }
+    }
+
+    fn line_height(&self) -> Pixels {
+        self.font_size * 1.4
+    }
+
+    fn gutter_width(&self) -> Pixels {
+        px(52.0)
+    }
+
+    fn text_x(&self, bounds: Bounds<Pixels>) -> Pixels {
+        bounds.left() + self.gutter_width() + px(8.0) + self.scroll_offset.x
+    }
+
+    fn number_x(&self, bounds: Bounds<Pixels>) -> Pixels {
+        bounds.left() + px(8.0)
+    }
+
+    fn line_y(&self, bounds: Bounds<Pixels>, line_index: usize) -> Pixels {
+        bounds.top() + self.line_height() * line_index as f32 + self.scroll_offset.y
+    }
+
+    fn line_index_for_y(&self, bounds: Bounds<Pixels>, y: Pixels) -> usize {
+        let local_y = y - bounds.top() - self.scroll_offset.y;
+        let line_height = self.line_height();
+        if line_height <= px(0.0) {
+            return 0;
+        }
+        (local_y / line_height).floor().max(0.0) as usize
+    }
+
+    fn scroll(&mut self, delta: Point<Pixels>) {
+        self.scroll_offset = self.scroll_offset + delta;
+        self.scroll_offset.y = self.scroll_offset.y.min(px(0.0));
+        self.scroll_offset.x = self.scroll_offset.x.min(px(0.0));
+    }
+
+    fn zoom(&mut self, delta: Pixels) {
+        self.font_size = (self.font_size + delta).max(px(8.0));
+    }
+
+    fn is_line_visible(&self, bounds: Bounds<Pixels>, line_index: usize) -> bool {
+        let y = self.line_y(bounds, line_index);
+        let line_height = self.line_height();
+        y + line_height >= bounds.top() && y <= bounds.bottom()
+    }
+}
+
 pub struct CodeEditor {
     focus_handle: FocusHandle,
     core: EditorCore,
-    last_bounds: Option<Bounds<Pixels>>,
-    scroll_offset: Point<Pixels>,
-    font_size: Pixels,
+    layout: EditorLayout,
 }
 
 impl CodeEditor {
@@ -93,9 +153,7 @@ impl CodeEditor {
         Self {
             focus_handle: cx.focus_handle(),
             core: EditorCore::new(),
-            last_bounds: None,
-            scroll_offset: point(px(0.0), px(0.0)),
-            font_size: px(14.0),
+            layout: EditorLayout::new(),
         }
     }
 
@@ -364,13 +422,11 @@ impl CodeEditor {
     }
 
     fn index_for_point(&self, point: Point<Pixels>, window: &Window) -> Option<usize> {
-        let bounds = self.last_bounds?;
+        let bounds = self.layout.last_bounds?;
         let content = self.core.content.as_str();
-        let line_height = self.font_size * 1.4;
-        let gutter_width = px(52.0);
-        let text_x = bounds.left() + gutter_width + px(8.0) + self.scroll_offset.x;
-        let local_y = point.y - bounds.top() - self.scroll_offset.y;
-        let mut line_index = (local_y / line_height).floor() as usize;
+        let text_x = self.layout.text_x(bounds);
+        
+        let mut line_index = self.layout.line_index_for_y(bounds, point.y);
         let starts = Self::line_start_indices(content);
         if starts.is_empty() {
             line_index = 0;
@@ -384,7 +440,7 @@ impl CodeEditor {
             content.len()
         };
         let line_text = &content[line_start..line_end];
-        let line = Self::shape_code_line(window, line_text, self.font_size);
+        let line = Self::shape_code_line(window, line_text, self.layout.font_size);
         let local_x = point.x - text_x;
         let utf8_index = line.index_for_x(local_x).unwrap_or(line_text.len());
         Some(line_start + utf8_index)
@@ -630,16 +686,10 @@ impl CodeEditor {
     ) {
         if window.modifiers().control {
             let delta = event.delta.pixel_delta(px(10.0)).y;
-            if delta > px(0.0) {
-                self.font_size += px(1.0);
-            } else {
-                self.font_size = (self.font_size - px(1.0)).max(px(8.0));
-            }
+            self.layout.zoom(delta);
         } else {
             let delta = event.delta.pixel_delta(px(20.0));
-            self.scroll_offset = self.scroll_offset + delta;
-            self.scroll_offset.y = self.scroll_offset.y.min(px(0.0));
-            self.scroll_offset.x = self.scroll_offset.x.min(px(0.0));
+            self.layout.scroll(delta);
         }
         cx.notify();
     }
@@ -748,10 +798,9 @@ impl EntityInputHandler for CodeEditor {
         let range = self.range_from_utf16(&range_utf16);
         let content = self.core.content.as_str();
         let (line_index, _, line_start) = Self::line_col_for_index(content, range.start);
-        let line_height = self.font_size * 1.4;
-        let gutter_width = px(52.0);
-        let text_x = bounds.left() + gutter_width + px(8.0) + self.scroll_offset.x;
-        let y = bounds.top() + line_height * line_index as f32 + self.scroll_offset.y;
+        let line_height = self.layout.line_height();
+        let text_x = self.layout.text_x(bounds);
+        let y = self.layout.line_y(bounds, line_index);
         let starts = Self::line_start_indices(content);
         let line_end = if line_index + 1 < starts.len() {
             starts[line_index + 1] - 1
@@ -759,7 +808,7 @@ impl EntityInputHandler for CodeEditor {
             content.len()
         };
         let line_text = &content[line_start..line_end];
-        let line = Self::shape_code_line(window, line_text, self.font_size);
+        let line = Self::shape_code_line(window, line_text, self.layout.font_size);
         let start_x = line.x_for_index(range.start - line_start);
         let end_x = line.x_for_index(range.end - line_start);
         Some(Bounds::from_corners(
@@ -774,13 +823,11 @@ impl EntityInputHandler for CodeEditor {
         window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
-        let bounds = self.last_bounds?;
+        let bounds = self.layout.last_bounds?;
         let content = self.core.content.as_str();
-        let line_height = self.font_size * 1.4;
-        let gutter_width = px(52.0);
-        let text_x = bounds.left() + gutter_width + px(8.0) + self.scroll_offset.x;
-        let local_y = point.y - bounds.top() - self.scroll_offset.y;
-        let mut line_index = (local_y / line_height).floor() as usize;
+        let text_x = self.layout.text_x(bounds);
+        
+        let mut line_index = self.layout.line_index_for_y(bounds, point.y);
         let starts = Self::line_start_indices(content);
         if starts.is_empty() {
             line_index = 0;
@@ -794,7 +841,7 @@ impl EntityInputHandler for CodeEditor {
             content.len()
         };
         let line_text = &content[line_start..line_end];
-        let line = Self::shape_code_line(window, line_text, self.font_size);
+        let line = Self::shape_code_line(window, line_text, self.layout.font_size);
         let local_x = point.x - text_x;
         let utf8_index = line.index_for_x(local_x).unwrap_or(line_text.len());
         Some(self.offset_to_utf16(line_start + utf8_index))
@@ -811,14 +858,24 @@ fn code_editor_canvas(editor: Entity<CodeEditor>, focus_handle: FocusHandle) -> 
                 cx,
             );
             editor.update(cx, |editor, _cx| {
-                editor.last_bounds = Some(bounds);
+                editor.layout.last_bounds = Some(bounds);
             });
-            let state = editor.read(cx);
-            let content = state.core.content.to_string();
-            let scroll_offset = state.scroll_offset;
-            let font_size = state.font_size;
-            let selection_anchor = state.core.selection_anchor;
-            let selected_range = state.core.selected_range.clone();
+            
+            let (layout, content, selection_anchor, selected_range) = {
+                let state = editor.read(cx);
+                (
+                    state.layout, 
+                    state.core.content.clone(), 
+                    state.core.selection_anchor, 
+                    state.core.selected_range.clone()
+                )
+            };
+
+            let font_size = layout.font_size;
+            let line_height = layout.line_height();
+            let text_x = layout.text_x(bounds);
+            let number_x = layout.number_x(bounds);
+
             let head = if selection_anchor == selected_range.start {
                 selected_range.end
             } else {
@@ -826,81 +883,108 @@ fn code_editor_canvas(editor: Entity<CodeEditor>, focus_handle: FocusHandle) -> 
             };
 
             window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                let line_height = font_size * 1.4;
-                let gutter_width = px(52.0);
-                let text_x = bounds.left() + gutter_width + px(8.0) + scroll_offset.x;
-                let number_x = bounds.left() + px(8.0);
                 let lines: Vec<&str> = content.split('\n').collect();
                 let line_count = lines.len().max(1);
                 let starts = CodeEditor::line_start_indices(&content);
                 let selection = selected_range.clone();
+                let (current_line, _, _) = CodeEditor::line_col_for_index(&content, head);
 
-                for i in 0..line_count {
-                    let line_text = lines.get(i).copied().unwrap_or("");
-                    let y = bounds.top() + line_height * i as f32 + scroll_offset.y;
+                let gutter_width = layout.gutter_width();
+                let text_area_bounds = Bounds::from_corners(
+                    point(bounds.left() + gutter_width, bounds.top()),
+                    bounds.bottom_right()
+                );
 
-                    // Optimization: Skip lines outside of bounds
-                    if y + line_height < bounds.top() || y > bounds.bottom() {
-                        continue;
+                let start_line = layout.line_index_for_y(bounds, bounds.top());
+                let end_line = (layout.line_index_for_y(bounds, bounds.bottom()) + 1).min(line_count);
+
+                // 1. Draw Global Backgrounds (Current Line Highlight)
+                // This covers full width including gutter
+                for i in start_line..end_line {
+                    let y = layout.line_y(bounds, i);
+                    if i == current_line {
+                        let highlight_bounds = Bounds::from_corners(
+                            point(bounds.left(), y),
+                            point(bounds.right(), y + line_height)
+                        );
+                        window.paint_quad(fill(highlight_bounds, rgba(0xffffff0d)));
                     }
+                }
 
-                    // Draw Selection Background
-                    if !selection.is_empty() {
-                        let line_start = starts.get(i).copied().unwrap_or(0);
-                        let line_end_incl_newline = if i + 1 < starts.len() {
-                            starts[i + 1]
-                        } else {
-                            content.len()
-                        };
-
-                        let sel_start = selection.start.max(line_start);
-                        let sel_end = selection.end.min(line_end_incl_newline);
-
-                        if sel_start < sel_end {
-                            let start_in_line = sel_start - line_start;
-                            let end_in_line = sel_end - line_start;
-                            let line_len = line_text.len();
-
-                            let shape_start = start_in_line.min(line_len);
-                            let shape_end = end_in_line.min(line_len);
-
-                            let text_line_shape = CodeEditor::shape_code_line(window, line_text, font_size);
-                            let start_x = text_line_shape.x_for_index(shape_start);
-                            let mut end_x = text_line_shape.x_for_index(shape_end);
-
-                            if end_in_line > line_len {
-                                end_x += px(10.0); // Visual width for newline
-                            }
-
-                            let rect_bounds = Bounds::from_corners(
-                                point(text_x + start_x, y),
-                                point(text_x + end_x, y + line_height)
-                            );
-                            window.paint_quad(fill(rect_bounds, rgba(0x264f78aa)));
-                        }
-                    }
-
+                // 2. Draw Gutter (Line Numbers)
+                // Clipped by outer bounds (editor bounds)
+                for i in start_line..end_line {
+                    let y = layout.line_y(bounds, i);
                     let number_text = format!("{}", i + 1);
                     let number_line =
                         CodeEditor::shape_line(window, &number_text, rgb(0xff8b949e).into(), font_size);
-                    let text_line =
-                        CodeEditor::shape_code_line(window, line_text, font_size);
                     number_line
                         .paint(point(number_x, y), line_height, window, cx)
                         .ok();
-                    text_line
-                        .paint(point(text_x, y), line_height, window, cx)
-                        .ok();
                 }
 
-                let (line, _col, line_start) = CodeEditor::line_col_for_index(&content, head);
-                let line_text = lines.get(line).copied().unwrap_or("");
-                let line_shape = CodeEditor::shape_code_line(window, line_text, font_size);
-                let local_index = head.saturating_sub(line_start);
-                let cursor_x = text_x + line_shape.x_for_index(local_index);
-                let cursor_y = bounds.top() + line_height * line as f32 + scroll_offset.y;
-                let cursor_bounds = Bounds::new(point(cursor_x, cursor_y), size(px(1.0), line_height));
-                window.paint_quad(fill(cursor_bounds, rgb(0xffffffff)));
+                // 3. Draw Text Area (Content + Selection + Cursor)
+                // Clipped by text_area_bounds (excludes gutter)
+                window.with_content_mask(Some(ContentMask { bounds: text_area_bounds }), |window| {
+                    for i in start_line..end_line {
+                        let line_text = lines.get(i).copied().unwrap_or("");
+                        let y = layout.line_y(bounds, i);
+
+                        // Draw Selection Background
+                        if !selection.is_empty() {
+                            let line_start = starts.get(i).copied().unwrap_or(0);
+                            let line_end_incl_newline = if i + 1 < starts.len() {
+                                starts[i + 1]
+                            } else {
+                                content.len()
+                            };
+
+                            let sel_start = selection.start.max(line_start);
+                            let sel_end = selection.end.min(line_end_incl_newline);
+
+                            if sel_start < sel_end {
+                                let start_in_line = sel_start - line_start;
+                                let end_in_line = sel_end - line_start;
+                                let line_len = line_text.len();
+
+                                let shape_start = start_in_line.min(line_len);
+                                let shape_end = end_in_line.min(line_len);
+
+                                let text_line_shape = CodeEditor::shape_code_line(window, line_text, font_size);
+                                let start_x = text_line_shape.x_for_index(shape_start);
+                                let mut end_x = text_line_shape.x_for_index(shape_end);
+
+                                if end_in_line > line_len {
+                                    end_x += px(10.0); // Visual width for newline
+                                }
+
+                                let rect_bounds = Bounds::from_corners(
+                                    point(text_x + start_x, y),
+                                    point(text_x + end_x, y + line_height)
+                                );
+                                window.paint_quad(fill(rect_bounds, rgba(0x264f78aa)));
+                            }
+                        }
+
+                        // Draw Text
+                        let text_line = CodeEditor::shape_code_line(window, line_text, font_size);
+                        text_line
+                            .paint(point(text_x, y), line_height, window, cx)
+                            .ok();
+                    }
+
+                    // Draw Cursor (only if visible)
+                    let (line, _col, line_start) = CodeEditor::line_col_for_index(&content, head);
+                    if line >= start_line && line < end_line {
+                        let line_text = lines.get(line).copied().unwrap_or("");
+                        let line_shape = CodeEditor::shape_code_line(window, line_text, font_size);
+                        let local_index = head.saturating_sub(line_start);
+                        let cursor_x = text_x + line_shape.x_for_index(local_index);
+                        let cursor_y = layout.line_y(bounds, line);
+                        let cursor_bounds = Bounds::new(point(cursor_x, cursor_y), size(px(1.0), line_height));
+                        window.paint_quad(fill(cursor_bounds, rgb(0xffffffff)));
+                    }
+                });
             });
         },
     )

@@ -1,0 +1,23 @@
+[package]
+name = "tiecode"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[dependencies]
+# gpui构建图形化程序
+gpui={version="0.2.2"}
+# 日志库，用于调试
+log = "0.4"
+# 简单的日志实现器，将日志输出到控制台
+env_logger = "0.10"
+
+libloading = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_repr = "0.1"
+thiserror = "1"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
+cc = "1"

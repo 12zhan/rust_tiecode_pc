@@ -20,14 +20,70 @@ actions!(
     ]
 );
 
-pub struct CodeEditor {
-    focus_handle: FocusHandle,
-    content: SharedString,
+struct EditorCore {
+    content: String,
     selected_range: Range<usize>,
     selection_anchor: usize,
     marked_range: Option<Range<usize>>,
-    last_bounds: Option<Bounds<Pixels>>,
     preferred_column: Option<usize>,
+}
+
+impl EditorCore {
+    fn new() -> Self {
+        Self {
+            content: String::new(),
+            selected_range: 0..0,
+            selection_anchor: 0,
+            marked_range: None,
+            preferred_column: None,
+        }
+    }
+
+    fn set_cursor(&mut self, index: usize) {
+        self.selected_range = index..index;
+        self.selection_anchor = index;
+        self.marked_range = None;
+        self.preferred_column = None;
+    }
+
+    fn select_to(&mut self, index: usize) {
+        let start = self.selection_anchor.min(index);
+        let end = self.selection_anchor.max(index);
+        self.selected_range = start..end;
+        self.marked_range = None;
+        self.preferred_column = None;
+    }
+
+    fn insert_text(&mut self, text: &str) {
+        let range = self.selected_range.clone();
+        let mut new_content = String::new();
+        new_content.push_str(&self.content[0..range.start]);
+        new_content.push_str(text);
+        new_content.push_str(&self.content[range.end..]);
+        let cursor = range.start + text.len();
+        self.content = new_content;
+        self.selected_range = cursor..cursor;
+        self.selection_anchor = cursor;
+        self.marked_range = None;
+        self.preferred_column = None;
+    }
+
+    fn delete_range(&mut self, range: Range<usize>) {
+        let mut new_content = String::new();
+        new_content.push_str(&self.content[0..range.start]);
+        new_content.push_str(&self.content[range.end..]);
+        self.content = new_content;
+        self.selected_range = range.start..range.start;
+        self.selection_anchor = range.start;
+        self.marked_range = None;
+        self.preferred_column = None;
+    }
+}
+
+pub struct CodeEditor {
+    focus_handle: FocusHandle,
+    core: EditorCore,
+    last_bounds: Option<Bounds<Pixels>>,
     scroll_offset: Point<Pixels>,
     font_size: Pixels,
 }
@@ -36,12 +92,8 @@ impl CodeEditor {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
-            content: "".into(),
-            selected_range: 0..0,
-            selection_anchor: 0,
-            marked_range: None,
+            core: EditorCore::new(),
             last_bounds: None,
-            preferred_column: None,
             scroll_offset: point(px(0.0), px(0.0)),
             font_size: px(14.0),
         }
@@ -51,7 +103,7 @@ impl CodeEditor {
         let mut utf8_offset = 0;
         let mut utf16_count = 0;
 
-        for ch in self.content.chars() {
+        for ch in self.core.content.chars() {
             if utf16_count >= offset {
                 break;
             }
@@ -66,7 +118,7 @@ impl CodeEditor {
         let mut utf16_offset = 0;
         let mut utf8_count = 0;
 
-        for ch in self.content.chars() {
+        for ch in self.core.content.chars() {
             if utf8_count >= offset {
                 break;
             }
@@ -313,7 +365,7 @@ impl CodeEditor {
 
     fn index_for_point(&self, point: Point<Pixels>, window: &Window) -> Option<usize> {
         let bounds = self.last_bounds?;
-        let content = self.content.as_ref();
+        let content = self.core.content.as_str();
         let line_height = self.font_size * 1.4;
         let gutter_width = px(52.0);
         let text_x = bounds.left() + gutter_width + px(8.0) + self.scroll_offset.x;
@@ -339,50 +391,24 @@ impl CodeEditor {
     }
 
     fn select_to(&mut self, index: usize, cx: &mut Context<Self>) {
-        let start = self.selection_anchor.min(index);
-        let end = self.selection_anchor.max(index);
-        self.selected_range = start..end;
-        self.marked_range = None;
-        self.preferred_column = None;
+        self.core.select_to(index);
         cx.notify();
     }
 
     fn set_cursor(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.selected_range = index..index;
-        self.selection_anchor = index;
-        self.marked_range = None;
-        self.preferred_column = None;
+        self.core.set_cursor(index);
         cx.notify();
     }
 
     fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        let range = self.selected_range.clone();
-        let content = self.content.to_string();
-        let mut new_content = String::new();
-        new_content.push_str(&content[0..range.start]);
-        new_content.push_str(text);
-        new_content.push_str(&content[range.end..]);
-        let cursor = range.start + text.len();
-        self.content = new_content.into();
-        self.selected_range = cursor..cursor;
-        self.selection_anchor = cursor;
-        self.marked_range = None;
-        self.preferred_column = None;
-        println!("{}", self.content);
+        self.core.insert_text(text);
+        println!("{}", self.core.content);
         cx.notify();
     }
 
     fn delete_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
-        let content = self.content.to_string();
-        let mut new_content = String::new();
-        new_content.push_str(&content[0..range.start]);
-        new_content.push_str(&content[range.end..]);
-        self.content = new_content.into();
-        self.selected_range = range.start..range.start;
-        self.selection_anchor = range.start;
-        self.marked_range = None;
-        self.preferred_column = None;
-        println!("{}", self.content);
+        self.core.delete_range(range);
+        println!("{}", self.core.content);
         cx.notify();
     }
 
@@ -416,12 +442,12 @@ impl CodeEditor {
     }
 
     fn backspace(&mut self, _: &Backspace, _window: &mut Window, cx: &mut Context<Self>) {
-        let content = self.content.to_string();
-        if !self.selected_range.is_empty() {
-            self.delete_range(self.selected_range.clone(), cx);
+        let content = self.core.content.to_string();
+        if !self.core.selected_range.is_empty() {
+            self.delete_range(self.core.selected_range.clone(), cx);
             return;
         }
-        let cursor = self.selected_range.end;
+        let cursor = self.core.selected_range.end;
         if cursor == 0 {
             return;
         }
@@ -430,12 +456,12 @@ impl CodeEditor {
     }
 
     fn delete(&mut self, _: &Delete, _window: &mut Window, cx: &mut Context<Self>) {
-        let content = self.content.to_string();
-        if !self.selected_range.is_empty() {
-            self.delete_range(self.selected_range.clone(), cx);
+        let content = self.core.content.to_string();
+        if !self.core.selected_range.is_empty() {
+            self.delete_range(self.core.selected_range.clone(), cx);
             return;
         }
-        let cursor = self.selected_range.end;
+        let cursor = self.core.selected_range.end;
         if cursor >= content.len() {
             return;
         }
@@ -460,20 +486,20 @@ impl CodeEditor {
     }
 
     fn copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_range.is_empty() {
+        if self.core.selected_range.is_empty() {
             return;
         }
-        let text = self.content.as_ref()[self.selected_range.clone()].to_string();
+        let text = self.core.content[self.core.selected_range.clone()].to_string();
         cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
     fn cut(&mut self, _: &Cut, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_range.is_empty() {
+        if self.core.selected_range.is_empty() {
             return;
         }
-        let text = self.content.as_ref()[self.selected_range.clone()].to_string();
+        let text = self.core.content[self.core.selected_range.clone()].to_string();
         cx.write_to_clipboard(ClipboardItem::new_string(text));
-        self.delete_range(self.selected_range.clone(), cx);
+        self.delete_range(self.core.selected_range.clone(), cx);
     }
 
     fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
@@ -498,64 +524,64 @@ impl CodeEditor {
     }
 
     fn move_left(&mut self, _: &Left, window: &mut Window, cx: &mut Context<Self>) {
-        let content = self.content.to_string();
+        let content = self.core.content.to_string();
         if window.modifiers().shift {
-            let head = if self.selection_anchor == self.selected_range.start {
-                self.selected_range.end
+            let head = if self.core.selection_anchor == self.core.selected_range.start {
+                self.core.selected_range.end
             } else {
-                self.selected_range.start
+                self.core.selected_range.start
             };
             let prev = Self::prev_char_index(&content, head);
             self.select_to(prev, cx);
         } else {
-            if !self.selected_range.is_empty() {
-                self.set_cursor(self.selected_range.start, cx);
+            if !self.core.selected_range.is_empty() {
+                self.set_cursor(self.core.selected_range.start, cx);
             } else {
-                let prev = Self::prev_char_index(&content, self.selected_range.start);
+                let prev = Self::prev_char_index(&content, self.core.selected_range.start);
                 self.set_cursor(prev, cx);
             }
         }
     }
 
     fn move_right(&mut self, _: &Right, window: &mut Window, cx: &mut Context<Self>) {
-        let content = self.content.to_string();
+        let content = self.core.content.to_string();
         if window.modifiers().shift {
-            let head = if self.selection_anchor == self.selected_range.start {
-                self.selected_range.end
+            let head = if self.core.selection_anchor == self.core.selected_range.start {
+                self.core.selected_range.end
             } else {
-                self.selected_range.start
+                self.core.selected_range.start
             };
             let next = Self::next_char_index(&content, head);
             self.select_to(next, cx);
         } else {
-            if !self.selected_range.is_empty() {
-                self.set_cursor(self.selected_range.end, cx);
+            if !self.core.selected_range.is_empty() {
+                self.set_cursor(self.core.selected_range.end, cx);
             } else {
-                let next = Self::next_char_index(&content, self.selected_range.end);
+                let next = Self::next_char_index(&content, self.core.selected_range.end);
                 self.set_cursor(next, cx);
             }
         }
     }
 
     fn move_up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
-        let content = self.content.to_string();
-        let head = if self.selection_anchor == self.selected_range.start {
-            self.selected_range.end
+        let content = self.core.content.to_string();
+        let head = if self.core.selection_anchor == self.core.selected_range.start {
+            self.core.selected_range.end
         } else {
-            self.selected_range.start
+            self.core.selected_range.start
         };
         let cursor = if window.modifiers().shift {
             head
         } else {
-            if !self.selected_range.is_empty() {
-                self.selected_range.start
+            if !self.core.selected_range.is_empty() {
+                self.core.selected_range.start
             } else {
                 head
             }
         };
 
         let (line, col, _) = Self::line_col_for_index(&content, cursor);
-        let preferred = self.preferred_column.get_or_insert(col);
+        let preferred = self.core.preferred_column.get_or_insert(col);
         let target_line = line.saturating_sub(1);
         let new_index = Self::index_for_line_col(&content, target_line, *preferred);
         
@@ -567,24 +593,24 @@ impl CodeEditor {
     }
 
     fn move_down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
-        let content = self.content.to_string();
-        let head = if self.selection_anchor == self.selected_range.start {
-            self.selected_range.end
+        let content = self.core.content.to_string();
+        let head = if self.core.selection_anchor == self.core.selected_range.start {
+            self.core.selected_range.end
         } else {
-            self.selected_range.start
+            self.core.selected_range.start
         };
         let cursor = if window.modifiers().shift {
             head
         } else {
-            if !self.selected_range.is_empty() {
-                self.selected_range.end
+            if !self.core.selected_range.is_empty() {
+                self.core.selected_range.end
             } else {
                 head
             }
         };
 
         let (line, col, _) = Self::line_col_for_index(&content, cursor);
-        let preferred = self.preferred_column.get_or_insert(col);
+        let preferred = self.core.preferred_column.get_or_insert(col);
         let starts = Self::line_start_indices(&content);
         let max_line = starts.len().saturating_sub(1);
         let target_line = (line + 1).min(max_line);
@@ -629,7 +655,7 @@ impl EntityInputHandler for CodeEditor {
     ) -> Option<String> {
         let range = self.range_from_utf16(&range_utf16);
         adjusted_range.replace(self.range_to_utf16(&range));
-        Some(self.content[range].to_string())
+        Some(self.core.content[range].to_string())
     }
 
     fn selected_text_range(
@@ -639,7 +665,7 @@ impl EntityInputHandler for CodeEditor {
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
         Some(UTF16Selection {
-            range: self.range_to_utf16(&self.selected_range),
+            range: self.range_to_utf16(&self.core.selected_range),
             reversed: false,
         })
     }
@@ -649,13 +675,14 @@ impl EntityInputHandler for CodeEditor {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Range<usize>> {
-        self.marked_range
+        self.core
+            .marked_range
             .as_ref()
             .map(|range| self.range_to_utf16(range))
     }
 
     fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
-        self.marked_range = None;
+        self.core.marked_range = None;
     }
 
     fn replace_text_in_range(
@@ -668,16 +695,15 @@ impl EntityInputHandler for CodeEditor {
         let range = range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .or(self.marked_range.clone())
-            .unwrap_or(self.selected_range.clone());
+            .or(self.core.marked_range.clone())
+            .unwrap_or(self.core.selected_range.clone());
 
-        self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
-                .into();
-        self.selected_range = range.start + new_text.len()..range.start + new_text.len();
-        self.marked_range = None;
-        self.preferred_column = None;
-        println!("{}", self.content);
+        self.core.content =
+            self.core.content[0..range.start].to_owned() + new_text + &self.core.content[range.end..];
+        self.core.selected_range = range.start + new_text.len()..range.start + new_text.len();
+        self.core.marked_range = None;
+        self.core.preferred_column = None;
+        println!("{}", self.core.content);
         cx.notify();
     }
 
@@ -692,24 +718,23 @@ impl EntityInputHandler for CodeEditor {
         let range = range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .or(self.marked_range.clone())
-            .unwrap_or(self.selected_range.clone());
+            .or(self.core.marked_range.clone())
+            .unwrap_or(self.core.selected_range.clone());
 
-        self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
-                .into();
+        self.core.content =
+            self.core.content[0..range.start].to_owned() + new_text + &self.core.content[range.end..];
         if !new_text.is_empty() {
-            self.marked_range = Some(range.start..range.start + new_text.len());
+            self.core.marked_range = Some(range.start..range.start + new_text.len());
         } else {
-            self.marked_range = None;
+            self.core.marked_range = None;
         }
-        self.selected_range = new_selected_range_utf16
+        self.core.selected_range = new_selected_range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .map(|new_range| range.start + new_range.start..range.start + new_range.end)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
-        self.preferred_column = None;
-        println!("{}", self.content);
+        self.core.preferred_column = None;
+        println!("{}", self.core.content);
         cx.notify();
     }
 
@@ -721,7 +746,7 @@ impl EntityInputHandler for CodeEditor {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let range = self.range_from_utf16(&range_utf16);
-        let content = self.content.as_ref();
+        let content = self.core.content.as_str();
         let (line_index, _, line_start) = Self::line_col_for_index(content, range.start);
         let line_height = self.font_size * 1.4;
         let gutter_width = px(52.0);
@@ -750,7 +775,7 @@ impl EntityInputHandler for CodeEditor {
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
         let bounds = self.last_bounds?;
-        let content = self.content.as_ref();
+        let content = self.core.content.as_str();
         let line_height = self.font_size * 1.4;
         let gutter_width = px(52.0);
         let text_x = bounds.left() + gutter_width + px(8.0) + self.scroll_offset.x;
@@ -789,12 +814,11 @@ fn code_editor_canvas(editor: Entity<CodeEditor>, focus_handle: FocusHandle) -> 
                 editor.last_bounds = Some(bounds);
             });
             let state = editor.read(cx);
-            let content = state.content.to_string();
+            let content = state.core.content.to_string();
             let scroll_offset = state.scroll_offset;
             let font_size = state.font_size;
-            let selection_anchor = state.selection_anchor;
-            let selected_range = state.selected_range.clone();
-            // Head logic: if anchor is start, head is end.
+            let selection_anchor = state.core.selection_anchor;
+            let selected_range = state.core.selected_range.clone();
             let head = if selection_anchor == selected_range.start {
                 selected_range.end
             } else {

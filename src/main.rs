@@ -4,7 +4,8 @@ mod codeedit;
 pub mod lsp;
 
 use codeedit::{
-    Backspace, CodeEditor, CtrlShiftTab, Delete, Down, Enter, Left, Right, ShiftTab, Tab, Up,
+    Backspace, CodeEditor, Copy, CtrlShiftTab, Cut, Delete, Down, Enter, Left, Paste, Right,
+    ShiftTab, Tab, Up,
 };
 use gpui::*;
 use log::*;
@@ -29,6 +30,9 @@ fn main() {
             KeyBinding::new("tab", Tab, Some("CodeEditor")),
             KeyBinding::new("shift-tab", ShiftTab, Some("CodeEditor")),
             KeyBinding::new("ctrl-shift-tab", CtrlShiftTab, Some("CodeEditor")),
+            KeyBinding::new("ctrl-c", Copy, Some("CodeEditor")),
+            KeyBinding::new("ctrl-x", Cut, Some("CodeEditor")),
+            KeyBinding::new("ctrl-v", Paste, Some("CodeEditor")),
         ]);
 
         let bounds = Bounds::centered(None, size(px(1200.0), px(700.0)), context);

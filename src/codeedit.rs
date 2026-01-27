@@ -13,7 +13,10 @@ actions!(
         Down,
         Tab,
         ShiftTab,
-        CtrlShiftTab
+        CtrlShiftTab,
+        Copy,
+        Cut,
+        Paste
     ]
 );
 
@@ -21,9 +24,12 @@ pub struct CodeEditor {
     focus_handle: FocusHandle,
     content: SharedString,
     selected_range: Range<usize>,
+    selection_anchor: usize,
     marked_range: Option<Range<usize>>,
     last_bounds: Option<Bounds<Pixels>>,
     preferred_column: Option<usize>,
+    scroll_offset: Point<Pixels>,
+    font_size: Pixels,
 }
 
 impl CodeEditor {
@@ -32,9 +38,12 @@ impl CodeEditor {
             focus_handle: cx.focus_handle(),
             content: "".into(),
             selected_range: 0..0,
+            selection_anchor: 0,
             marked_range: None,
             last_bounds: None,
             preferred_column: None,
+            scroll_offset: point(px(0.0), px(0.0)),
+            font_size: px(14.0),
         }
     }
 
@@ -76,7 +85,7 @@ impl CodeEditor {
         self.offset_from_utf16(range_utf16.start)..self.offset_from_utf16(range_utf16.end)
     }
 
-    fn shape_line(window: &Window, text: &str, color: Hsla) -> gpui::ShapedLine {
+    fn shape_line(window: &Window, text: &str, color: Hsla, font_size: Pixels) -> gpui::ShapedLine {
         let style = window.text_style();
         let run = TextRun {
             len: text.len(),
@@ -86,11 +95,148 @@ impl CodeEditor {
             underline: None,
             strikethrough: None,
         };
-        let font_size = style.font_size.to_pixels(window.rem_size());
         window.text_system().shape_line(
             SharedString::from(text.to_string()),
             font_size,
             &[run],
+            None,
+        )
+    }
+
+    fn highlight_cpp(text: &str) -> Vec<(Range<usize>, Hsla)> {
+        let mut highlights = Vec::new();
+        let mut cursor = 0;
+        let chars: Vec<(usize, char)> = text.char_indices().collect();
+        let len = chars.len();
+
+        while cursor < len {
+            let (start_byte, ch) = chars[cursor];
+
+            // Comments //
+            if ch == '/' && cursor + 1 < len && chars[cursor + 1].1 == '/' {
+                let end_byte = text.len();
+                highlights.push((start_byte..end_byte, rgb(0x6a9955).into())); // Green
+                break;
+            }
+
+            // Strings "
+            if ch == '"' {
+                let mut end_idx = cursor + 1;
+                while end_idx < len {
+                    if chars[end_idx].1 == '"' && (end_idx == 0 || chars[end_idx - 1].1 != '\\') {
+                        end_idx += 1;
+                        break;
+                    }
+                    end_idx += 1;
+                }
+                let end_byte = if end_idx < len { chars[end_idx].0 } else { text.len() };
+                highlights.push((start_byte..end_byte, rgb(0xce9178).into())); // Brown
+                cursor = end_idx;
+                continue;
+            }
+
+            // Keywords / Identifiers
+            if ch.is_alphabetic() || ch == '_' || ch == '#' {
+                let mut end_idx = cursor + 1;
+                while end_idx < len {
+                    let (_, c) = chars[end_idx];
+                    if !c.is_alphanumeric() && c != '_' {
+                        break;
+                    }
+                    end_idx += 1;
+                }
+
+                let end_byte = if end_idx < len { chars[end_idx].0 } else { text.len() };
+                let word = &text[start_byte..end_byte];
+
+                let color = match word {
+                    "int" | "char" | "float" | "double" | "bool" | "void" | "long" | "short" | "signed" | "unsigned" |
+                    "if" | "else" | "for" | "while" | "do" | "switch" | "case" | "default" | "break" | "continue" | "return" | "goto" |
+                    "struct" | "class" | "enum" | "union" | "typedef" | "typename" | "template" | "namespace" | "using" |
+                    "public" | "private" | "protected" | "virtual" | "override" | "static" | "const" | "inline" | "friend" |
+                    "true" | "false" | "nullptr" | "this" | "new" | "delete" | "sizeof" | "operator" | "explicit" | "noexcept" |
+                    "#include" | "#define" | "#ifdef" | "#ifndef" | "#endif" | "#pragma" => Some(rgb(0x569cd6).into()), // Blue
+                    _ => None,
+                };
+
+                if let Some(c) = color {
+                    highlights.push((start_byte..end_byte, c));
+                }
+
+                cursor = end_idx;
+                continue;
+            }
+
+            // Numbers
+            if ch.is_ascii_digit() {
+                let mut end_idx = cursor + 1;
+                let mut has_dot = false;
+                while end_idx < len {
+                    let (_, c) = chars[end_idx];
+                    if c == '.' && !has_dot {
+                        has_dot = true;
+                    } else if !c.is_ascii_digit() {
+                        break;
+                    }
+                    end_idx += 1;
+                }
+                let end_byte = if end_idx < len { chars[end_idx].0 } else { text.len() };
+                highlights.push((start_byte..end_byte, rgb(0xb5cea8).into())); // Light Green
+                cursor = end_idx;
+                continue;
+            }
+
+            cursor += 1;
+        }
+
+        highlights
+    }
+
+    fn shape_code_line(window: &Window, text: &str, font_size: Pixels) -> gpui::ShapedLine {
+        let style = window.text_style();
+        let font = style.font();
+        let highlights = Self::highlight_cpp(text);
+        
+        let mut runs = Vec::new();
+        let mut current_byte = 0;
+
+        for (range, color) in highlights {
+            if range.start > current_byte {
+                runs.push(TextRun {
+                    len: range.start - current_byte,
+                    font: font.clone(),
+                    color: rgb(0xffffffff).into(), // Default White
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                });
+            }
+            runs.push(TextRun {
+                len: range.len(),
+                font: font.clone(),
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+            current_byte = range.end;
+        }
+
+        if current_byte < text.len() {
+            runs.push(TextRun {
+                len: text.len() - current_byte,
+                font: font.clone(),
+                color: rgb(0xffffffff).into(), // Default White
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+        }
+
+        window.text_system().shape_line(
+            SharedString::from(text.to_string()),
+            font_size,
+            &runs,
             None,
         )
     }
@@ -165,8 +311,45 @@ impl CodeEditor {
         text.len()
     }
 
+    fn index_for_point(&self, point: Point<Pixels>, window: &Window) -> Option<usize> {
+        let bounds = self.last_bounds?;
+        let content = self.content.as_ref();
+        let line_height = self.font_size * 1.4;
+        let gutter_width = px(52.0);
+        let text_x = bounds.left() + gutter_width + px(8.0) + self.scroll_offset.x;
+        let local_y = point.y - bounds.top() - self.scroll_offset.y;
+        let mut line_index = (local_y / line_height).floor() as usize;
+        let starts = Self::line_start_indices(content);
+        if starts.is_empty() {
+            line_index = 0;
+        } else if line_index >= starts.len() {
+            line_index = starts.len() - 1;
+        }
+        let line_start = starts.get(line_index).copied().unwrap_or(0);
+        let line_end = if line_index + 1 < starts.len() {
+            starts[line_index + 1] - 1
+        } else {
+            content.len()
+        };
+        let line_text = &content[line_start..line_end];
+        let line = Self::shape_code_line(window, line_text, self.font_size);
+        let local_x = point.x - text_x;
+        let utf8_index = line.index_for_x(local_x).unwrap_or(line_text.len());
+        Some(line_start + utf8_index)
+    }
+
+    fn select_to(&mut self, index: usize, cx: &mut Context<Self>) {
+        let start = self.selection_anchor.min(index);
+        let end = self.selection_anchor.max(index);
+        self.selected_range = start..end;
+        self.marked_range = None;
+        self.preferred_column = None;
+        cx.notify();
+    }
+
     fn set_cursor(&mut self, index: usize, cx: &mut Context<Self>) {
         self.selected_range = index..index;
+        self.selection_anchor = index;
         self.marked_range = None;
         self.preferred_column = None;
         cx.notify();
@@ -182,6 +365,7 @@ impl CodeEditor {
         let cursor = range.start + text.len();
         self.content = new_content.into();
         self.selected_range = cursor..cursor;
+        self.selection_anchor = cursor;
         self.marked_range = None;
         self.preferred_column = None;
         println!("{}", self.content);
@@ -195,6 +379,7 @@ impl CodeEditor {
         new_content.push_str(&content[range.end..]);
         self.content = new_content.into();
         self.selected_range = range.start..range.start;
+        self.selection_anchor = range.start;
         self.marked_range = None;
         self.preferred_column = None;
         println!("{}", self.content);
@@ -207,33 +392,27 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(bounds) = self.last_bounds else {
-            return;
-        };
-        let content = self.content.to_string();
-        let line_height = window.line_height();
-        let gutter_width = px(52.0);
-        let text_x = bounds.left() + gutter_width + px(8.0);
-        let local_y = event.position.y - bounds.top();
-        let mut line = (local_y / line_height).floor() as usize;
-        let starts = Self::line_start_indices(&content);
-        if starts.is_empty() {
-            line = 0;
-        } else if line >= starts.len() {
-            line = starts.len() - 1;
+        if let Some(index) = self.index_for_point(event.position, window) {
+            if event.modifiers.shift {
+                self.select_to(index, cx);
+            } else {
+                self.set_cursor(index, cx);
+            }
         }
-        let line_start = starts.get(line).copied().unwrap_or(0);
-        let line_end = if line + 1 < starts.len() {
-            starts[line + 1] - 1
-        } else {
-            content.len()
-        };
-        let line_text = &content[line_start..line_end];
-        let line_shape = Self::shape_line(window, line_text, window.text_style().color);
-        let local_x = event.position.x - text_x;
-        let utf8_index = line_shape.index_for_x(local_x).unwrap_or(line_text.len());
-        let cursor = line_start + utf8_index;
-        self.set_cursor(cursor, cx);
+    }
+
+    fn on_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.pressed_button.is_none() {
+            return;
+        }
+        if let Some(index) = self.index_for_point(event.position, window) {
+            self.select_to(index, cx);
+        }
     }
 
     fn backspace(&mut self, _: &Backspace, _window: &mut Window, cx: &mut Context<Self>) {
@@ -280,6 +459,31 @@ impl CodeEditor {
         println!("special: ctrl-shift-tab");
     }
 
+    fn copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            return;
+        }
+        let text = self.content.as_ref()[self.selected_range.clone()].to_string();
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
+    fn cut(&mut self, _: &Cut, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            return;
+        }
+        let text = self.content.as_ref()[self.selected_range.clone()].to_string();
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.delete_range(self.selected_range.clone(), cx);
+    }
+
+    fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(item) = cx.read_from_clipboard() {
+            if let Some(text) = item.text() {
+                self.insert_text(&text, cx);
+            }
+        }
+    }
+
     fn on_modifiers_changed(
         &mut self,
         event: &ModifiersChangedEvent,
@@ -293,49 +497,124 @@ impl CodeEditor {
         }
     }
 
-    fn move_left(&mut self, _: &Left, _window: &mut Window, cx: &mut Context<Self>) {
+    fn move_left(&mut self, _: &Left, window: &mut Window, cx: &mut Context<Self>) {
         let content = self.content.to_string();
-        let cursor = if self.selected_range.is_empty() {
+        if window.modifiers().shift {
+            let head = if self.selection_anchor == self.selected_range.start {
+                self.selected_range.end
+            } else {
+                self.selected_range.start
+            };
+            let prev = Self::prev_char_index(&content, head);
+            self.select_to(prev, cx);
+        } else {
+            if !self.selected_range.is_empty() {
+                self.set_cursor(self.selected_range.start, cx);
+            } else {
+                let prev = Self::prev_char_index(&content, self.selected_range.start);
+                self.set_cursor(prev, cx);
+            }
+        }
+    }
+
+    fn move_right(&mut self, _: &Right, window: &mut Window, cx: &mut Context<Self>) {
+        let content = self.content.to_string();
+        if window.modifiers().shift {
+            let head = if self.selection_anchor == self.selected_range.start {
+                self.selected_range.end
+            } else {
+                self.selected_range.start
+            };
+            let next = Self::next_char_index(&content, head);
+            self.select_to(next, cx);
+        } else {
+            if !self.selected_range.is_empty() {
+                self.set_cursor(self.selected_range.end, cx);
+            } else {
+                let next = Self::next_char_index(&content, self.selected_range.end);
+                self.set_cursor(next, cx);
+            }
+        }
+    }
+
+    fn move_up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
+        let content = self.content.to_string();
+        let head = if self.selection_anchor == self.selected_range.start {
             self.selected_range.end
         } else {
             self.selected_range.start
         };
-        let prev = Self::prev_char_index(&content, cursor);
-        self.set_cursor(prev, cx);
-    }
-
-    fn move_right(&mut self, _: &Right, _window: &mut Window, cx: &mut Context<Self>) {
-        let content = self.content.to_string();
-        let cursor = if self.selected_range.is_empty() {
-            self.selected_range.end
+        let cursor = if window.modifiers().shift {
+            head
         } else {
-            self.selected_range.end
+            if !self.selected_range.is_empty() {
+                self.selected_range.start
+            } else {
+                head
+            }
         };
-        let next = Self::next_char_index(&content, cursor);
-        self.set_cursor(next, cx);
-    }
 
-    fn move_up(&mut self, _: &Up, _window: &mut Window, cx: &mut Context<Self>) {
-        let content = self.content.to_string();
-        let cursor = self.selected_range.end;
         let (line, col, _) = Self::line_col_for_index(&content, cursor);
         let preferred = self.preferred_column.get_or_insert(col);
         let target_line = line.saturating_sub(1);
         let new_index = Self::index_for_line_col(&content, target_line, *preferred);
-        self.selected_range = new_index..new_index;
-        cx.notify();
+        
+        if window.modifiers().shift {
+            self.select_to(new_index, cx);
+        } else {
+            self.set_cursor(new_index, cx);
+        }
     }
 
-    fn move_down(&mut self, _: &Down, _window: &mut Window, cx: &mut Context<Self>) {
+    fn move_down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
         let content = self.content.to_string();
-        let cursor = self.selected_range.end;
+        let head = if self.selection_anchor == self.selected_range.start {
+            self.selected_range.end
+        } else {
+            self.selected_range.start
+        };
+        let cursor = if window.modifiers().shift {
+            head
+        } else {
+            if !self.selected_range.is_empty() {
+                self.selected_range.end
+            } else {
+                head
+            }
+        };
+
         let (line, col, _) = Self::line_col_for_index(&content, cursor);
         let preferred = self.preferred_column.get_or_insert(col);
         let starts = Self::line_start_indices(&content);
         let max_line = starts.len().saturating_sub(1);
         let target_line = (line + 1).min(max_line);
         let new_index = Self::index_for_line_col(&content, target_line, *preferred);
-        self.selected_range = new_index..new_index;
+        
+        if window.modifiers().shift {
+            self.select_to(new_index, cx);
+        } else {
+            self.set_cursor(new_index, cx);
+        }
+    }
+    fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if window.modifiers().control {
+            let delta = event.delta.pixel_delta(px(10.0)).y;
+            if delta > px(0.0) {
+                self.font_size += px(1.0);
+            } else {
+                self.font_size = (self.font_size - px(1.0)).max(px(8.0));
+            }
+        } else {
+            let delta = event.delta.pixel_delta(px(20.0));
+            self.scroll_offset = self.scroll_offset + delta;
+            self.scroll_offset.y = self.scroll_offset.y.min(px(0.0));
+            self.scroll_offset.x = self.scroll_offset.x.min(px(0.0));
+        }
         cx.notify();
     }
 }
@@ -444,10 +723,10 @@ impl EntityInputHandler for CodeEditor {
         let range = self.range_from_utf16(&range_utf16);
         let content = self.content.as_ref();
         let (line_index, _, line_start) = Self::line_col_for_index(content, range.start);
-        let line_height = window.line_height();
+        let line_height = self.font_size * 1.4;
         let gutter_width = px(52.0);
-        let text_x = bounds.left() + gutter_width + px(8.0);
-        let y = bounds.top() + line_height * line_index as f32;
+        let text_x = bounds.left() + gutter_width + px(8.0) + self.scroll_offset.x;
+        let y = bounds.top() + line_height * line_index as f32 + self.scroll_offset.y;
         let starts = Self::line_start_indices(content);
         let line_end = if line_index + 1 < starts.len() {
             starts[line_index + 1] - 1
@@ -455,7 +734,7 @@ impl EntityInputHandler for CodeEditor {
             content.len()
         };
         let line_text = &content[line_start..line_end];
-        let line = Self::shape_line(window, line_text, window.text_style().color);
+        let line = Self::shape_code_line(window, line_text, self.font_size);
         let start_x = line.x_for_index(range.start - line_start);
         let end_x = line.x_for_index(range.end - line_start);
         Some(Bounds::from_corners(
@@ -472,10 +751,10 @@ impl EntityInputHandler for CodeEditor {
     ) -> Option<usize> {
         let bounds = self.last_bounds?;
         let content = self.content.as_ref();
-        let line_height = window.line_height();
+        let line_height = self.font_size * 1.4;
         let gutter_width = px(52.0);
-        let text_x = bounds.left() + gutter_width + px(8.0);
-        let local_y = point.y - bounds.top();
+        let text_x = bounds.left() + gutter_width + px(8.0) + self.scroll_offset.x;
+        let local_y = point.y - bounds.top() - self.scroll_offset.y;
         let mut line_index = (local_y / line_height).floor() as usize;
         let starts = Self::line_start_indices(content);
         if starts.is_empty() {
@@ -490,7 +769,7 @@ impl EntityInputHandler for CodeEditor {
             content.len()
         };
         let line_text = &content[line_start..line_end];
-        let line = Self::shape_line(window, line_text, window.text_style().color);
+        let line = Self::shape_code_line(window, line_text, self.font_size);
         let local_x = point.x - text_x;
         let utf8_index = line.index_for_x(local_x).unwrap_or(line_text.len());
         Some(self.offset_to_utf16(line_start + utf8_index))
@@ -511,38 +790,94 @@ fn code_editor_canvas(editor: Entity<CodeEditor>, focus_handle: FocusHandle) -> 
             });
             let state = editor.read(cx);
             let content = state.content.to_string();
-            let cursor = state.selected_range.end;
-            let line_height = window.line_height();
-            let gutter_width = px(52.0);
-            let text_x = bounds.left() + gutter_width + px(8.0);
-            let number_x = bounds.left() + px(8.0);
-            let lines: Vec<&str> = content.split('\n').collect();
-            let line_count = lines.len().max(1);
+            let scroll_offset = state.scroll_offset;
+            let font_size = state.font_size;
+            let selection_anchor = state.selection_anchor;
+            let selected_range = state.selected_range.clone();
+            // Head logic: if anchor is start, head is end.
+            let head = if selection_anchor == selected_range.start {
+                selected_range.end
+            } else {
+                selected_range.start
+            };
 
-            for i in 0..line_count {
-                let line_text = lines.get(i).copied().unwrap_or("");
-                let y = bounds.top() + line_height * i as f32;
-                let number_text = format!("{}", i + 1);
-                let number_line =
-                    CodeEditor::shape_line(window, &number_text, rgb(0xff8b949e).into());
-                let text_line =
-                    CodeEditor::shape_line(window, line_text, window.text_style().color);
-                number_line
-                    .paint(point(number_x, y), line_height, window, cx)
-                    .ok();
-                text_line
-                    .paint(point(text_x, y), line_height, window, cx)
-                    .ok();
-            }
+            window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                let line_height = font_size * 1.4;
+                let gutter_width = px(52.0);
+                let text_x = bounds.left() + gutter_width + px(8.0) + scroll_offset.x;
+                let number_x = bounds.left() + px(8.0);
+                let lines: Vec<&str> = content.split('\n').collect();
+                let line_count = lines.len().max(1);
+                let starts = CodeEditor::line_start_indices(&content);
+                let selection = selected_range.clone();
 
-            let (line, _col, line_start) = CodeEditor::line_col_for_index(&content, cursor);
-            let line_text = lines.get(line).copied().unwrap_or("");
-            let line_shape = CodeEditor::shape_line(window, line_text, window.text_style().color);
-            let local_index = cursor.saturating_sub(line_start);
-            let cursor_x = text_x + line_shape.x_for_index(local_index);
-            let cursor_y = bounds.top() + line_height * line as f32;
-            let cursor_bounds = Bounds::new(point(cursor_x, cursor_y), size(px(1.0), line_height));
-            window.paint_quad(fill(cursor_bounds, rgb(0xffffffff)));
+                for i in 0..line_count {
+                    let line_text = lines.get(i).copied().unwrap_or("");
+                    let y = bounds.top() + line_height * i as f32 + scroll_offset.y;
+
+                    // Optimization: Skip lines outside of bounds
+                    if y + line_height < bounds.top() || y > bounds.bottom() {
+                        continue;
+                    }
+
+                    // Draw Selection Background
+                    if !selection.is_empty() {
+                        let line_start = starts.get(i).copied().unwrap_or(0);
+                        let line_end_incl_newline = if i + 1 < starts.len() {
+                            starts[i + 1]
+                        } else {
+                            content.len()
+                        };
+
+                        let sel_start = selection.start.max(line_start);
+                        let sel_end = selection.end.min(line_end_incl_newline);
+
+                        if sel_start < sel_end {
+                            let start_in_line = sel_start - line_start;
+                            let end_in_line = sel_end - line_start;
+                            let line_len = line_text.len();
+
+                            let shape_start = start_in_line.min(line_len);
+                            let shape_end = end_in_line.min(line_len);
+
+                            let text_line_shape = CodeEditor::shape_code_line(window, line_text, font_size);
+                            let start_x = text_line_shape.x_for_index(shape_start);
+                            let mut end_x = text_line_shape.x_for_index(shape_end);
+
+                            if end_in_line > line_len {
+                                end_x += px(10.0); // Visual width for newline
+                            }
+
+                            let rect_bounds = Bounds::from_corners(
+                                point(text_x + start_x, y),
+                                point(text_x + end_x, y + line_height)
+                            );
+                            window.paint_quad(fill(rect_bounds, rgba(0x264f78aa)));
+                        }
+                    }
+
+                    let number_text = format!("{}", i + 1);
+                    let number_line =
+                        CodeEditor::shape_line(window, &number_text, rgb(0xff8b949e).into(), font_size);
+                    let text_line =
+                        CodeEditor::shape_code_line(window, line_text, font_size);
+                    number_line
+                        .paint(point(number_x, y), line_height, window, cx)
+                        .ok();
+                    text_line
+                        .paint(point(text_x, y), line_height, window, cx)
+                        .ok();
+                }
+
+                let (line, _col, line_start) = CodeEditor::line_col_for_index(&content, head);
+                let line_text = lines.get(line).copied().unwrap_or("");
+                let line_shape = CodeEditor::shape_code_line(window, line_text, font_size);
+                let local_index = head.saturating_sub(line_start);
+                let cursor_x = text_x + line_shape.x_for_index(local_index);
+                let cursor_y = bounds.top() + line_height * line as f32 + scroll_offset.y;
+                let cursor_bounds = Bounds::new(point(cursor_x, cursor_y), size(px(1.0), line_height));
+                window.paint_quad(fill(cursor_bounds, rgb(0xffffffff)));
+            });
         },
     )
     .w_full()
@@ -559,13 +894,18 @@ impl Render for CodeEditor {
             .track_focus(&focus_handle)
             .cursor(CursorStyle::IBeam)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::enter))
             .on_action(cx.listener(Self::tab))
             .on_action(cx.listener(Self::shift_tab))
             .on_action(cx.listener(Self::ctrl_shift_tab))
+            .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::cut))
+            .on_action(cx.listener(Self::paste))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
+            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .on_action(cx.listener(Self::move_left))
             .on_action(cx.listener(Self::move_right))
             .on_action(cx.listener(Self::move_up))

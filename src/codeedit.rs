@@ -100,16 +100,14 @@ impl EditorLayout {
         self.font_size * 1.4
     }
 
-    fn gutter_width(&self) -> Pixels {
-        px(52.0)
+    fn gutter_width(&self, max_digits: usize) -> Pixels {
+        let digit_width = self.font_size * 0.75; // Approximation for digit width
+        let padding = px(16.0); // 8px left + 8px right
+        digit_width * (max_digits as f32) + padding
     }
 
-    fn text_x(&self, bounds: Bounds<Pixels>) -> Pixels {
-        bounds.left() + self.gutter_width() + px(8.0) + self.scroll_offset.x
-    }
-
-    fn number_x(&self, bounds: Bounds<Pixels>) -> Pixels {
-        bounds.left() + px(8.0)
+    fn text_x(&self, bounds: Bounds<Pixels>, max_digits: usize) -> Pixels {
+        bounds.left() + self.gutter_width(max_digits) + px(8.0) + self.scroll_offset.x
     }
 
     fn line_y(&self, bounds: Bounds<Pixels>, line_index: usize) -> Pixels {
@@ -424,7 +422,12 @@ impl CodeEditor {
     fn index_for_point(&self, point: Point<Pixels>, window: &Window) -> Option<usize> {
         let bounds = self.layout.last_bounds?;
         let content = self.core.content.as_str();
-        let text_x = self.layout.text_x(bounds);
+        
+        // Calculate max digits
+        let line_count = content.split('\n').count().max(1);
+        let max_digits = line_count.to_string().len();
+        
+        let text_x = self.layout.text_x(bounds, max_digits);
         
         let mut line_index = self.layout.line_index_for_y(bounds, point.y);
         let starts = Self::line_start_indices(content);
@@ -797,9 +800,14 @@ impl EntityInputHandler for CodeEditor {
     ) -> Option<Bounds<Pixels>> {
         let range = self.range_from_utf16(&range_utf16);
         let content = self.core.content.as_str();
+        
+        // Calculate max digits
+        let line_count = content.split('\n').count().max(1);
+        let max_digits = line_count.to_string().len();
+
         let (line_index, _, line_start) = Self::line_col_for_index(content, range.start);
         let line_height = self.layout.line_height();
-        let text_x = self.layout.text_x(bounds);
+        let text_x = self.layout.text_x(bounds, max_digits);
         let y = self.layout.line_y(bounds, line_index);
         let starts = Self::line_start_indices(content);
         let line_end = if line_index + 1 < starts.len() {
@@ -825,7 +833,13 @@ impl EntityInputHandler for CodeEditor {
     ) -> Option<usize> {
         let bounds = self.layout.last_bounds?;
         let content = self.core.content.as_str();
-        let text_x = self.layout.text_x(bounds);
+        
+        // Calculate max digits
+        let line_count = content.split('\n').count().max(1);
+        let max_digits = line_count.to_string().len();
+
+        let line_height = self.layout.line_height();
+        let text_x = self.layout.text_x(bounds, max_digits);
         
         let mut line_index = self.layout.line_index_for_y(bounds, point.y);
         let starts = Self::line_start_indices(content);
@@ -873,8 +887,13 @@ fn code_editor_canvas(editor: Entity<CodeEditor>, focus_handle: FocusHandle) -> 
 
             let font_size = layout.font_size;
             let line_height = layout.line_height();
-            let text_x = layout.text_x(bounds);
-            let number_x = layout.number_x(bounds);
+
+            let lines: Vec<&str> = content.split('\n').collect();
+            let line_count = lines.len().max(1);
+            let max_digits = line_count.to_string().len();
+
+            let text_x = layout.text_x(bounds, max_digits);
+            // number_x will be calculated per line for right alignment
 
             let head = if selection_anchor == selected_range.start {
                 selected_range.end
@@ -883,13 +902,11 @@ fn code_editor_canvas(editor: Entity<CodeEditor>, focus_handle: FocusHandle) -> 
             };
 
             window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                let lines: Vec<&str> = content.split('\n').collect();
-                let line_count = lines.len().max(1);
                 let starts = CodeEditor::line_start_indices(&content);
                 let selection = selected_range.clone();
                 let (current_line, _, _) = CodeEditor::line_col_for_index(&content, head);
 
-                let gutter_width = layout.gutter_width();
+                let gutter_width = layout.gutter_width(max_digits);
                 let text_area_bounds = Bounds::from_corners(
                     point(bounds.left() + gutter_width, bounds.top()),
                     bounds.bottom_right()
@@ -918,6 +935,13 @@ fn code_editor_canvas(editor: Entity<CodeEditor>, focus_handle: FocusHandle) -> 
                     let number_text = format!("{}", i + 1);
                     let number_line =
                         CodeEditor::shape_line(window, &number_text, rgb(0xff8b949e).into(), font_size);
+                    
+                    // Right align numbers in gutter
+                    // Gutter ends at bounds.left() + gutter_width
+                    // Padding is 8px (right padding)
+                    let number_width = number_line.width;
+                    let number_x = bounds.left() + gutter_width - px(8.0) - number_width;
+
                     number_line
                         .paint(point(number_x, y), line_height, window, cx)
                         .ok();

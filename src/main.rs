@@ -1,11 +1,11 @@
 #![cfg_attr(all(not(test), not(debug_assertions)), windows_subsystem = "windows")]
 
-mod codeedit;
+mod editor;
 pub mod lsp;
 
-use codeedit::{
-    Backspace, CodeEditor, Copy, CtrlShiftTab, Cut, Delete, Down, Enter, Left, Paste, Right,
-    ShiftTab, Tab, Up,
+use editor::{
+    Backspace, CodeEditor, Copy, CtrlShiftTab, Cut, Delete, DeleteLine, Down, Enter, Left, Paste,
+    Right, ShiftTab, Tab, Up,
 };
 use gpui::*;
 use log::*;
@@ -20,6 +20,7 @@ fn main() {
         context.bind_keys([
             KeyBinding::new("backspace", Backspace, Some("CodeEditor")),
             KeyBinding::new("delete", Delete, Some("CodeEditor")),
+            KeyBinding::new("ctrl-shift-k", DeleteLine, Some("CodeEditor")),
             KeyBinding::new("left", Left, Some("CodeEditor")),
             KeyBinding::new("right", Right, Some("CodeEditor")),
             KeyBinding::new("up", Up, Some("CodeEditor")),
@@ -84,8 +85,6 @@ impl Render for StartWindow {
                 div()
                     .flex_1()
                     .flex()
-                    .justify_center()
-                    .items_center()
                     .w_full()
                     .bg(rgb(0xff2d353b))
                     .child(self.editor.clone()),

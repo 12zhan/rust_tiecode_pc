@@ -5253,6 +5253,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_repr",
+ "smallvec",
  "thiserror 1.0.69",
  "winres",
 ]

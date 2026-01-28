@@ -1,5 +1,7 @@
 use gpui::*;
 use std::ops::Range;
+use crate::lsp::client::{LspClient, JsonRpcResponse};
+use std::sync::{Arc, Mutex};
 
 actions!(
     code_editor,
@@ -44,6 +46,7 @@ enum CompletionKind {
     Variable,
     Class,
     Keyword,
+    Text,
 }
 
 impl CompletionKind {
@@ -53,6 +56,7 @@ impl CompletionKind {
             Self::Variable => "V",
             Self::Class => "T",
             Self::Keyword => "K",
+            Self::Text => "abc",
         }
     }
 
@@ -62,6 +66,7 @@ impl CompletionKind {
             Self::Variable => rgb(0xd02a8c).into(), // Magenta
             Self::Class => rgb(0xaaaaaa).into(),    // Gray
             Self::Keyword => rgb(0x569cd6).into(),  // Blue
+            Self::Text => rgb(0xcccccc).into(),     // Light Gray
         }
     }
 }
@@ -189,14 +194,158 @@ pub struct CodeEditor {
     focus_handle: FocusHandle,
     core: EditorCore,
     layout: EditorLayout,
+    lsp_client: Option<Arc<Mutex<LspClient>>>,
 }
 
 impl CodeEditor {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let client_opt = LspClient::new("pylsp", &[], move |msg| {
+            let _ = tx.send(msg);
+        }).ok().map(|c| Arc::new(Mutex::new(c)));
+
+        if let Some(client) = &client_opt {
+             if let Ok(mut c) = client.lock() {
+                 c.send_request("initialize", serde_json::json!({
+                     "processId": null,
+                     "rootUri": null,
+                     "capabilities": {}
+                 }));
+                 c.send_notification("initialized", serde_json::json!({}));
+                 c.send_notification("textDocument/didOpen", serde_json::json!({
+                     "textDocument": {
+                         "uri": "file:///temp.py",
+                         "languageId": "python",
+                         "version": 1,
+                         "text": ""
+                     }
+                 }));
+             }
+
+             let rx = Arc::new(Mutex::new(rx));
+             cx.spawn(|editor: gpui::WeakEntity<CodeEditor>, cx: &mut gpui::AsyncApp| {
+                    let cx = cx.clone();
+                    async move {
+                 loop {
+                     let mut msgs = Vec::new();
+                     if let Ok(rx) = rx.lock() {
+                         while let Ok(msg) = rx.try_recv() {
+                             msgs.push(msg);
+                         }
+                     }
+                     
+                     if !msgs.is_empty() {
+                         let _ = cx.update(|cx| {
+                             let _ = editor.update(cx, |editor: &mut CodeEditor, cx: &mut Context<CodeEditor>| {
+                                 for msg in msgs {
+                                     editor.handle_lsp_message(msg, cx);
+                                 }
+                             });
+                         });
+                     }
+                     
+                     cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
+                 }
+             }}).detach();
+        }
+
         Self {
             focus_handle: cx.focus_handle(),
             core: EditorCore::new(),
             layout: EditorLayout::new(),
+            lsp_client: client_opt,
+        }
+    }
+
+    fn handle_lsp_message(&mut self, msg: JsonRpcResponse, cx: &mut Context<Self>) {
+        if let Some(result) = msg.result {
+             // Try parsing as CompletionList
+             let items_json = if let Some(obj) = result.as_object() {
+                 if let Some(items) = obj.get("items") {
+                     items.as_array()
+                 } else {
+                     None
+                 }
+             } else if let Some(arr) = result.as_array() {
+                 Some(arr)
+             } else {
+                 None
+             };
+
+             if let Some(items) = items_json {
+                 println!("LSP Completion Items: {}", items.len());
+                 let mut completion_items = Vec::new();
+
+                 // 1. Re-generate mock items for "combined effect"
+                 let cursor = self.core.selected_range.start;
+                 let content = &self.core.content;
+                 let mut word_start = cursor;
+                 for (i, ch) in content[..cursor].char_indices().rev() {
+                     if !ch.is_alphanumeric() && ch != '_' && ch != '#' {
+                         word_start = i + ch.len_utf8();
+                         break;
+                     }
+                     word_start = i;
+                 }
+                 
+                 let prefix = if word_start < cursor {
+                     &content[word_start..cursor]
+                 } else {
+                     ""
+                 };
+
+                 if !prefix.is_empty() {
+                    let mock_data = vec![
+                        CompletionItem { label: "main".to_string(), kind: CompletionKind::Function, detail: " void".to_string() },
+                        CompletionItem { label: "miss".to_string(), kind: CompletionKind::Class, detail: " class".to_string() },
+                        CompletionItem { label: "miii".to_string(), kind: CompletionKind::Text, detail: " text".to_string() },
+                        CompletionItem { label: "min".to_string(), kind: CompletionKind::Variable, detail: " int".to_string() },
+                        CompletionItem { label: "ant".to_string(), kind: CompletionKind::Variable, detail: " int".to_string() },
+                        CompletionItem { label: "Demo".to_string(), kind: CompletionKind::Class, detail: "".to_string() },
+                    ];
+                    for item in mock_data {
+                        if item.label.starts_with(prefix) && item.label != prefix {
+                            completion_items.push(item);
+                        }
+                    }
+                 }
+
+                 for item in items {
+                     if let Some(label) = item.get("label").and_then(|v| v.as_str()) {
+                         // Filter by prefix
+                         if prefix.is_empty() || !label.starts_with(prefix) {
+                             continue;
+                         }
+
+                         let detail = item.get("detail").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                         let kind_int = item.get("kind").and_then(|v| v.as_u64()).unwrap_or(1);
+                         
+                         let kind = match kind_int {
+                             2 | 3 => CompletionKind::Function,
+                             6 => CompletionKind::Variable,
+                             7 => CompletionKind::Class,
+                             14 => CompletionKind::Keyword,
+                             1 => CompletionKind::Text,
+                             _ => CompletionKind::Text,
+                         };
+                         
+                         if !completion_items.iter().any(|i| i.label == label) {
+                             completion_items.push(CompletionItem {
+                                 label: label.to_string(),
+                                 kind,
+                                 detail,
+                             });
+                         }
+                     }
+                 }
+                 
+                 if !completion_items.is_empty() {
+                     self.core.completion_active = true;
+                     self.core.completion_items = completion_items;
+                     self.core.completion_index = 0;
+                     cx.notify();
+                 }
+             }
         }
     }
 
@@ -526,8 +675,11 @@ impl CodeEditor {
                     
                     // Add mock data for demonstration if they match prefix
                     let mock_data = vec![
-                        CompletionItem { label: "main".to_string(), kind: CompletionKind::Function, detail: ":void".to_string() },
-                        CompletionItem { label: "ant".to_string(), kind: CompletionKind::Variable, detail: ":int".to_string() },
+                        CompletionItem { label: "main".to_string(), kind: CompletionKind::Function, detail: " void".to_string() },
+                        CompletionItem { label: "miss".to_string(), kind: CompletionKind::Class, detail: " class".to_string() },
+                        CompletionItem { label: "miii".to_string(), kind: CompletionKind::Text, detail: " text".to_string() },
+                        CompletionItem { label: "min".to_string(), kind: CompletionKind::Variable, detail: " int".to_string() },
+                        CompletionItem { label: "ant".to_string(), kind: CompletionKind::Variable, detail: " int".to_string() },
                         CompletionItem { label: "Demo".to_string(), kind: CompletionKind::Class, detail: "".to_string() },
                     ];
 
@@ -544,6 +696,23 @@ impl CodeEditor {
                                  kind: CompletionKind::Keyword,
                                  detail: "".to_string(),
                              });
+                        }
+                    }
+                    
+                    // Send LSP request
+                    if let Some(client) = &self.lsp_client {
+                        if let Ok(mut c) = client.lock() {
+                            let (line, col, _) = CodeEditor::line_col_for_index(content, cursor);
+                             let params = serde_json::json!({
+                                "textDocument": {
+                                    "uri": "file:///temp.py"
+                                },
+                                "position": {
+                                    "line": line,
+                                    "character": col
+                                }
+                            });
+                            c.send_request("textDocument/completion", params);
                         }
                     }
                     
@@ -596,6 +765,23 @@ impl CodeEditor {
 
     fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.core.insert_text(text);
+        
+        if let Some(client) = &self.lsp_client {
+             if let Ok(mut c) = client.lock() {
+                 c.send_notification("textDocument/didChange", serde_json::json!({
+                     "textDocument": {
+                         "uri": "file:///temp.py",
+                         "version": null
+                     },
+                     "contentChanges": [
+                         {
+                             "text": self.core.content
+                         }
+                     ]
+                 }));
+             }
+        }
+
         self.update_completion(cx);
         // println!("{}", self.core.content); // Removed spammy print
         cx.notify();
@@ -603,6 +789,23 @@ impl CodeEditor {
 
     fn delete_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
         self.core.delete_range(range);
+        
+        if let Some(client) = &self.lsp_client {
+             if let Ok(mut c) = client.lock() {
+                 c.send_notification("textDocument/didChange", serde_json::json!({
+                     "textDocument": {
+                         "uri": "file:///temp.py",
+                         "version": null
+                     },
+                     "contentChanges": [
+                         {
+                             "text": self.core.content
+                         }
+                     ]
+                 }));
+             }
+        }
+
         self.update_completion(cx);
         // println!("{}", self.core.content); // Removed spammy print
         cx.notify();
@@ -678,7 +881,7 @@ impl CodeEditor {
             self.confirm_completion(cx);
             return;
         }
-        self.insert_text("\t", cx);
+        self.insert_text("    ", cx);
     }
 
     fn shift_tab(&mut self, _: &ShiftTab, _window: &mut Window, _cx: &mut Context<Self>) {
@@ -935,10 +1138,12 @@ impl EntityInputHandler for CodeEditor {
 
         self.core.content =
             self.core.content[0..range.start].to_owned() + new_text + &self.core.content[range.end..];
-        self.core.selected_range = range.start + new_text.len()..range.start + new_text.len();
+        let new_cursor = range.start + new_text.len();
+        self.core.selected_range = new_cursor..new_cursor;
+        self.core.selection_anchor = new_cursor;
         self.core.marked_range = None;
         self.core.preferred_column = None;
-        println!("{}", self.core.content);
+        self.update_completion(cx);
         cx.notify();
     }
 
@@ -968,8 +1173,8 @@ impl EntityInputHandler for CodeEditor {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .map(|new_range| range.start + new_range.start..range.start + new_range.end)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+        self.core.selection_anchor = self.core.selected_range.start;
         self.core.preferred_column = None;
-        println!("{}", self.core.content);
         cx.notify();
     }
 

@@ -52,4 +52,47 @@ impl EditorLayout {
     pub fn zoom(&mut self, delta: Pixels) {
         self.font_size = (self.font_size + delta).clamp(px(6.0), px(100.0));
     }
+
+    // Scrollbar helpers
+    pub fn scrollbar_width(&self) -> Pixels {
+        px(14.0)
+    }
+
+    pub fn content_height(&self, line_count: usize) -> Pixels {
+        self.line_height() * line_count as f32
+    }
+
+    pub fn thumb_bounds(
+        &self,
+        bounds: Bounds<Pixels>,
+        content_height: Pixels,
+    ) -> Bounds<Pixels> {
+        let view_height = bounds.size.height;
+        let scrollbar_width = self.scrollbar_width();
+        
+        if content_height <= view_height {
+            return Bounds::default();
+        }
+
+        let total_scrollable_height = content_height + view_height * 0.5; // Allow some overscroll/padding
+        
+        let thumb_height = (view_height / total_scrollable_height * view_height).max(px(20.0));
+        let max_thumb_y = view_height - thumb_height;
+        
+        // Calculate thumb position based on scroll offset
+        // scroll_offset.y is negative, ranging from 0 to -(content_height - view_height)
+        let scroll_y = -self.scroll_offset.y;
+        let max_scroll_y = (content_height - view_height).max(px(0.0));
+        
+        let thumb_y = if max_scroll_y > px(0.0) {
+            (scroll_y / max_scroll_y) * max_thumb_y
+        } else {
+            px(0.0)
+        };
+
+        Bounds::new(
+            point(bounds.right() - scrollbar_width, bounds.top() + thumb_y),
+            size(scrollbar_width, thumb_height),
+        )
+    }
 }

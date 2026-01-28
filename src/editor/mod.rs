@@ -5,6 +5,7 @@ use std::ops::Range;
 pub mod core;
 pub mod layout;
 pub mod completion;
+pub mod undo;
 
 use self::core::EditorCore;
 use self::layout::EditorLayout;
@@ -26,7 +27,9 @@ actions!(
         CtrlShiftTab,
         Copy,
         Cut,
-        Paste
+        Paste,
+        Undo,
+        Redo
     ]
 );
 
@@ -34,6 +37,9 @@ pub struct CodeEditor {
     pub focus_handle: FocusHandle,
     pub core: EditorCore,
     pub layout: EditorLayout,
+    dragging_scrollbar: bool,
+    drag_start_y: Option<Pixels>,
+    scroll_start_y: Option<Pixels>,
 }
 
 impl CodeEditor {
@@ -42,6 +48,9 @@ impl CodeEditor {
             focus_handle: cx.focus_handle(),
             core: EditorCore::new(),
             layout: EditorLayout::new(),
+            dragging_scrollbar: false,
+            drag_start_y: None,
+            scroll_start_y: None,
         }
     }
 
@@ -280,6 +289,16 @@ impl CodeEditor {
 
     fn ctrl_shift_tab(&mut self, _: &CtrlShiftTab, _window: &mut Window, _cx: &mut Context<Self>) {
         println!("special: ctrl-shift-tab");
+    }
+
+    fn undo(&mut self, _: &Undo, _window: &mut Window, cx: &mut Context<Self>) {
+        self.core.undo();
+        cx.notify();
+    }
+
+    fn redo(&mut self, _: &Redo, _window: &mut Window, cx: &mut Context<Self>) {
+        self.core.redo();
+        cx.notify();
     }
 
     fn copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
@@ -709,18 +728,8 @@ impl EntityInputHandler for CodeEditor {
             .or(self.core.marked_range.clone())
             .unwrap_or(self.core.selected_range.clone());
 
-        let start_char = self.core.content.byte_to_char(range.start);
-        let end_char = self.core.content.byte_to_char(range.end);
-        if start_char < end_char {
-             self.core.content.remove(start_char..end_char);
-        }
-        self.core.content.insert(start_char, new_text);
-
-        let new_cursor = range.start + new_text.len();
-        self.core.selected_range = new_cursor..new_cursor;
-        self.core.selection_anchor = new_cursor;
-        self.core.marked_range = None;
-        self.core.preferred_column = None;
+        self.core.replace_range(range, new_text);
+        
         self.update_completion(cx);
         cx.notify();
     }
@@ -739,12 +748,7 @@ impl EntityInputHandler for CodeEditor {
             .or(self.core.marked_range.clone())
             .unwrap_or(self.core.selected_range.clone());
 
-        let start_char = self.core.content.byte_to_char(range.start);
-        let end_char = self.core.content.byte_to_char(range.end);
-        if start_char < end_char {
-             self.core.content.remove(start_char..end_char);
-        }
-        self.core.content.insert(start_char, new_text);
+        self.core.replace_range(range.clone(), new_text);
 
         if !new_text.is_empty() {
             self.core.marked_range = Some(range.start..range.start + new_text.len());
@@ -869,6 +873,34 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Check scrollbar
+        if let Some(bounds) = self.layout.last_bounds {
+             let content_height = self.layout.content_height(self.core.content.len_lines());
+             let thumb_bounds = self.layout.thumb_bounds(bounds, content_height);
+             
+             // Check if hit scrollbar track
+             let scrollbar_width = self.layout.scrollbar_width();
+             let track_bounds = Bounds::new(
+                 point(bounds.right() - scrollbar_width, bounds.top()),
+                 size(scrollbar_width, bounds.size.height)
+             );
+             
+             if track_bounds.contains(&event.position) {
+                 if thumb_bounds.contains(&event.position) {
+                     self.dragging_scrollbar = true;
+                     self.drag_start_y = Some(event.position.y);
+                     self.scroll_start_y = Some(self.layout.scroll_offset.y);
+                 } else {
+                     // Click on track - simple jump for now
+                     let percent = (event.position.y - bounds.top()) / bounds.size.height;
+                     let max_scroll = (content_height - bounds.size.height).max(px(0.0));
+                     self.layout.scroll_offset.y = -max_scroll * percent;
+                 }
+                 cx.notify();
+                 return;
+             }
+        }
+
         if let Some(index) = self.index_for_point(event.position, window) {
             if event.modifiers.shift {
                 self.select_to(index, cx);
@@ -878,12 +910,51 @@ impl CodeEditor {
         }
     }
 
+    fn on_mouse_up(
+        &mut self,
+        _event: &MouseUpEvent,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        self.dragging_scrollbar = false;
+        self.drag_start_y = None;
+        self.scroll_start_y = None;
+    }
+
     fn on_mouse_move(
         &mut self,
         event: &MouseMoveEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.dragging_scrollbar {
+             if event.pressed_button != Some(MouseButton::Left) {
+                 self.dragging_scrollbar = false;
+                 return;
+             }
+             
+             if let (Some(start_y), Some(scroll_start), Some(bounds)) = (self.drag_start_y, self.scroll_start_y, self.layout.last_bounds) {
+                 let delta_y = event.position.y - start_y;
+                 let content_height = self.layout.content_height(self.core.content.len_lines());
+                 let view_height = bounds.size.height;
+                 
+                 let thumb_bounds = self.layout.thumb_bounds(bounds, content_height);
+                 let track_height = view_height;
+                 let thumb_travel_range = track_height - thumb_bounds.size.height;
+                 
+                 if thumb_travel_range > px(0.0) {
+                     let scroll_range = content_height - view_height;
+                     let scroll_ratio = scroll_range / thumb_travel_range;
+                     let scroll_delta = -delta_y * scroll_ratio;
+                     
+                     let new_scroll_y = (scroll_start + scroll_delta).clamp(-scroll_range, px(0.0));
+                     self.layout.scroll_offset.y = new_scroll_y;
+                     cx.notify();
+                 }
+             }
+             return;
+        }
+
         if event.pressed_button.is_none() {
             return;
         }
@@ -904,6 +975,7 @@ impl Render for CodeEditor {
             .track_focus(&focus_handle)
             .cursor(CursorStyle::IBeam)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
@@ -920,6 +992,8 @@ impl Render for CodeEditor {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::undo))
+            .on_action(cx.listener(Self::redo))
             .child(code_editor_canvas(editor, focus_handle))
     }
 }
@@ -1160,6 +1234,26 @@ pub fn code_editor_canvas(editor: Entity<CodeEditor>, focus_handle: FocusHandle)
                                 detail_line.paint(point(detail_x, detail_y), item_height, window, cx).ok();
                             }
                         }
+                    }
+
+                    // Draw Scrollbar
+                    let content_height = layout.content_height(line_count);
+                    let thumb_bounds = layout.thumb_bounds(bounds, content_height);
+
+                    if !thumb_bounds.is_empty() {
+                        let scrollbar_width = layout.scrollbar_width();
+                        let track_bounds = Bounds::new(
+                            point(bounds.right() - scrollbar_width, bounds.top()),
+                            size(scrollbar_width, bounds.size.height)
+                        );
+                        
+                        // Draw track
+                        window.paint_quad(fill(track_bounds, rgba(0x00000000)));
+                        
+                        // Draw thumb
+                        let mut thumb_quad = fill(thumb_bounds, rgba(0x42424280));
+                        thumb_quad.corner_radii = Corners::all(px(4.0));
+                        window.paint_quad(thumb_quad);
                     }
                 });
             });

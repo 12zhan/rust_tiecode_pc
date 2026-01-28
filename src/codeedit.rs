@@ -27,8 +27,43 @@ struct EditorCore {
     marked_range: Option<Range<usize>>,
     preferred_column: Option<usize>,
     completion_active: bool,
-    completion_items: Vec<String>,
+    completion_items: Vec<CompletionItem>,
     completion_index: usize,
+}
+
+#[derive(Clone, Debug)]
+struct CompletionItem {
+    label: String,
+    kind: CompletionKind,
+    detail: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CompletionKind {
+    Function,
+    Variable,
+    Class,
+    Keyword,
+}
+
+impl CompletionKind {
+    fn icon_text(&self) -> &'static str {
+        match self {
+            Self::Function => "F",
+            Self::Variable => "V",
+            Self::Class => "T",
+            Self::Keyword => "K",
+        }
+    }
+
+    fn color(&self) -> Hsla {
+        match self {
+            Self::Function => rgb(0xdcb628).into(), // Yellow
+            Self::Variable => rgb(0xd02a8c).into(), // Magenta
+            Self::Class => rgb(0xaaaaaa).into(),    // Gray
+            Self::Keyword => rgb(0x569cd6).into(),  // Blue
+        }
+    }
 }
 
 const CPP_KEYWORDS: &[&str] = &[
@@ -488,9 +523,27 @@ impl CodeEditor {
                 let prefix = &content[word_start..cursor];
                 if !prefix.is_empty() {
                     let mut items = Vec::new();
+                    
+                    // Add mock data for demonstration if they match prefix
+                    let mock_data = vec![
+                        CompletionItem { label: "main".to_string(), kind: CompletionKind::Function, detail: ":void".to_string() },
+                        CompletionItem { label: "ant".to_string(), kind: CompletionKind::Variable, detail: ":int".to_string() },
+                        CompletionItem { label: "Demo".to_string(), kind: CompletionKind::Class, detail: "".to_string() },
+                    ];
+
+                    for item in mock_data {
+                        if item.label.starts_with(prefix) && item.label != prefix {
+                            items.push(item);
+                        }
+                    }
+
                     for keyword in CPP_KEYWORDS {
                         if keyword.starts_with(prefix) && *keyword != prefix {
-                             items.push(keyword.to_string());
+                             items.push(CompletionItem {
+                                 label: keyword.to_string(),
+                                 kind: CompletionKind::Keyword,
+                                 detail: "".to_string(),
+                             });
                         }
                     }
                     
@@ -532,7 +585,7 @@ impl CodeEditor {
         }
         
         self.core.delete_range(word_start..cursor);
-        self.core.insert_text(&item);
+        self.core.insert_text(&item.label);
         
         self.core.completion_active = false;
         self.core.completion_items.clear();
@@ -1135,11 +1188,14 @@ fn code_editor_canvas(editor: Entity<CodeEditor>, focus_handle: FocusHandle) -> 
                         let item_height = layout.line_height();
                         let font_size = layout.font_size;
                         
-                        // Calculate width based on max item length
-                        let max_len = completion_items.iter().map(|s| s.len()).max().unwrap_or(10);
+                        // Calculate width based on max item length (label + detail)
+                        let max_len = completion_items.iter().map(|s| s.label.len() + s.detail.len()).max().unwrap_or(10);
                         let char_width = font_size * 0.75; // Approximation
-                        let padding_x = px(16.0);
-                        let menu_width = (char_width * max_len as f32 + padding_x).max(px(150.0));
+                        let icon_size = item_height * 0.8;
+                        let padding_x = px(8.0);
+                        let menu_padding = px(4.0);
+                        let content_width = (char_width * max_len as f32 + icon_size + padding_x * 3.0).max(px(150.0));
+                        let menu_width = content_width + menu_padding * 2.0;
 
                         // Handle scrolling for completion items if needed, for now just show top 10
                         let start_index = if completion_index >= 10 {
@@ -1148,44 +1204,130 @@ fn code_editor_canvas(editor: Entity<CodeEditor>, focus_handle: FocusHandle) -> 
                             0
                         };
                         let display_count = completion_items.len().min(10);
-                        let menu_height = item_height * display_count as f32;
+                        let menu_height = item_height * display_count as f32 + menu_padding * 2.0;
                         
                         let menu_bounds = Bounds::new(
                             point(menu_x, menu_y),
                             size(menu_width, menu_height)
                         );
                         
-                        let border_width = px(1.0);
-                        let border_bounds = Bounds::from_corners(
-                            point(menu_x - border_width, menu_y - border_width),
-                            point(menu_x + menu_width + border_width, menu_y + menu_height + border_width)
-                        );
-                        window.paint_quad(fill(border_bounds, rgb(0x454545)));
-                        window.paint_quad(fill(menu_bounds, rgb(0x252526)));
+                        // Draw menu background with rounded corners, border
+                        let mut menu_quad = fill(menu_bounds, rgb(0x252526));
+                        menu_quad.border_widths = Edges::all(px(1.0));
+                        menu_quad.border_color = rgb(0x454545).into();
+                        menu_quad.corner_radii = Corners::all(px(6.0));
+                        window.paint_quad(menu_quad);
                         
                         // Items
                         let items_to_show = completion_items.iter().skip(start_index).take(10);
                         for (i, item) in items_to_show.enumerate() {
                             let actual_index = start_index + i;
-                            let item_y = menu_y + item_height * i as f32;
+                            let item_y = menu_y + menu_padding + item_height * i as f32;
                             let item_bounds = Bounds::new(
-                                point(menu_x, item_y),
-                                size(menu_width, item_height)
+                                point(menu_x + menu_padding, item_y),
+                                size(content_width, item_height)
                             );
                             
                             if actual_index == completion_index {
-                                window.paint_quad(fill(item_bounds, rgb(0x04395e)));
+                                let mut highlight_quad = fill(item_bounds, rgb(0x455056));
+                                highlight_quad.corner_radii = Corners::all(px(4.0));
+                                window.paint_quad(highlight_quad);
                             }
                             
+                            // Draw Icon
+                            let icon_padding = (item_height - icon_size) / 2.0;
+                            let icon_rect = Bounds::new(
+                                point(menu_x + menu_padding + px(4.0), item_y + icon_padding),
+                                size(icon_size, icon_size)
+                            );
+                            window.paint_quad(fill(icon_rect, item.kind.color()));
+                            
+                            // Draw Icon Character
+                            let icon_char_shape = CodeEditor::shape_line(
+                                window,
+                                item.kind.icon_text(),
+                                rgb(0xffffff).into(), // White text for icon
+                                font_size * 0.8 // Smaller font for icon
+                            );
+                            // Center char in icon rect
+                            let char_x = icon_rect.left() + (icon_size - icon_char_shape.width) / 2.0;
+                            // GPUI ShapedLine uses ascent/descent, not simple height.
+                            // But since we are drawing text with `paint`, we need to find the right y to visually center it.
+                            // Usually `paint` takes the baseline origin.
+                            // To center visually: box_top + (box_height + (ascent - descent)) / 2  - ascent ??
+                            // Or simpler: just align baseline to a calculated center line.
+                            // Center line of icon box: item_y + item_height / 2.0
+                            // Baseline offset: (ascent - descent) / 2.0 ?
+                            // Let's try: item_y + (item_height + (ascent - descent))/2.0 - descent 
+                            // Actually, let's just use item_y which is top of the row.
+                            // The `paint` method on ShapedLine usually expects the origin to be the top-left or baseline-left depending on implementation.
+                            // Looking at `paint` signature in other places: `paint(origin, line_height, ...)`
+                            // If it takes line_height, it might handle vertical centering or just fill the line.
+                            // Let's just use `item_y` as we did for other text, but maybe add a small offset if icon font is smaller.
+                            // The icon font is 0.8 * font_size.
+                            // Let's center it within the icon_rect.
+                            // We can use `item_y + (item_height - icon_char_shape.ascent - icon_char_shape.descent)/2.0 + icon_char_shape.ascent`?
+                            // Let's stick to simple `item_y` for now but shift x.
+                            // And maybe shift y slightly if it looks off.
+                            // Actually, let's just use the same `item_y` as the main text to align baselines if possible,
+                            // but here we want to center inside the colored box.
+                            
+                            // Let's use `paint` at (char_x, item_y) and trust `line_height` handling or adjust.
+                            // But wait, the previous code used `item_y + px(2.0)`.
+                            // Let's try to center it better.
+                            // `ShapedLine` has `ascent` and `descent`.
+                            // Height ~ ascent + descent.
+                            // We want to center (ascent + descent) within icon_size.
+                            // Top of text relative to baseline is -ascent. Bottom is descent.
+                            // Center of text relative to baseline is (descent - ascent) / 2.
+                            // Center of icon_rect relative to item_top is icon_padding + icon_size/2.
+                            // We want baseline y such that: baseline_y + (descent - ascent)/2 = item_y + icon_padding + icon_size/2
+                            // => baseline_y = item_y + icon_padding + icon_size/2 - (descent - ascent)/2
+                            
+                            // However, `paint` takes `origin` which is usually the top-left of the line box (for standard line layout).
+                            // If `paint` expects top-left, we can just calculate top-left to center the text height.
+                            // Text height = ascent + descent.
+                            // Top offset = (icon_size - (ascent + descent)) / 2.0.
+                            // y = icon_rect.top() + Top offset.
+                            
+                            // Let's check what `paint` does. In `CodeEditor::render`, we use `paint(point(x, y), line_height, ...)`
+                            // So it probably aligns based on line_height.
+                            // Let's just use item_y for Y coordinate to keep it simple and aligned with the row for now.
+                            // But since the font is smaller, we might need to push it down a bit to vertically center with the larger text?
+                            // No, smaller font on same line_height usually aligns baseline or middle?
+                            // Let's just try centering the `icon_char_shape` within `icon_rect` manually.
+                            
+                            let text_height = icon_char_shape.ascent + icon_char_shape.descent;
+                            let y_offset = (icon_size - text_height) / 2.0;
+                            let char_y = icon_rect.top() + y_offset; 
+                            
+                            // NOTE: shaped_line.paint() behavior depends on GPUI version. 
+                            // If it draws from top-left of the line bounds:
+                            icon_char_shape.paint(point(char_x, char_y), item_height, window, cx).ok();
+
+
+                            // Draw Label
                             let text_shape = CodeEditor::shape_line(
                                 window, 
-                                item, 
+                                &item.label, 
                                 rgb(0xcccccc).into(), 
                                 font_size
                             );
                             
-                            let text_padding_x = px(8.0);
-                            text_shape.paint(point(menu_x + text_padding_x, item_y), item_height, window, cx).ok();
+                            let text_start_x = menu_x + menu_padding + icon_size + px(12.0);
+                            text_shape.paint(point(text_start_x, item_y), item_height, window, cx).ok();
+                            
+                            // Draw Detail
+                            if !item.detail.is_empty() {
+                                let detail_shape = CodeEditor::shape_line(
+                                    window, 
+                                    &item.detail, 
+                                    rgb(0x808080).into(), // Gray
+                                    font_size
+                                );
+                                let label_width = text_shape.width;
+                                detail_shape.paint(point(text_start_x + label_width, item_y), item_height, window, cx).ok();
+                            }
                         }
                     }
                 });

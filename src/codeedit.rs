@@ -26,7 +26,19 @@ struct EditorCore {
     selection_anchor: usize,
     marked_range: Option<Range<usize>>,
     preferred_column: Option<usize>,
+    completion_active: bool,
+    completion_items: Vec<String>,
+    completion_index: usize,
 }
+
+const CPP_KEYWORDS: &[&str] = &[
+    "int", "char", "float", "double", "bool", "void", "long", "short", "signed", "unsigned",
+    "if", "else", "for", "while", "do", "switch", "case", "default", "break", "continue", "return", "goto",
+    "struct", "class", "enum", "union", "typedef", "typename", "template", "namespace", "using",
+    "public", "private", "protected", "virtual", "override", "static", "const", "inline", "friend",
+    "true", "false", "nullptr", "this", "new", "delete", "sizeof", "operator", "explicit", "noexcept",
+    "#include", "#define", "#ifdef", "#ifndef", "#endif", "#pragma"
+];
 
 impl EditorCore {
     fn new() -> Self {
@@ -36,6 +48,9 @@ impl EditorCore {
             selection_anchor: 0,
             marked_range: None,
             preferred_column: None,
+            completion_active: false,
+            completion_items: Vec::new(),
+            completion_index: 0,
         }
     }
 
@@ -133,11 +148,6 @@ impl EditorLayout {
         self.font_size = (self.font_size + delta).max(px(8.0));
     }
 
-    fn is_line_visible(&self, bounds: Bounds<Pixels>, line_index: usize) -> bool {
-        let y = self.line_y(bounds, line_index);
-        let line_height = self.line_height();
-        y + line_height >= bounds.top() && y <= bounds.bottom()
-    }
 }
 
 pub struct CodeEditor {
@@ -456,18 +466,92 @@ impl CodeEditor {
 
     fn set_cursor(&mut self, index: usize, cx: &mut Context<Self>) {
         self.core.set_cursor(index);
+        self.core.completion_active = false; // Hide completion on manual cursor move
+        cx.notify();
+    }
+
+    fn update_completion(&mut self, cx: &mut Context<Self>) {
+        if self.core.selected_range.is_empty() {
+            let cursor = self.core.selected_range.start;
+            let content = &self.core.content;
+            
+            let mut word_start = cursor;
+            for (i, ch) in content[..cursor].char_indices().rev() {
+                 if !ch.is_alphanumeric() && ch != '_' && ch != '#' {
+                     word_start = i + ch.len_utf8();
+                     break;
+                 }
+                 word_start = i;
+            }
+            
+            if word_start < cursor {
+                let prefix = &content[word_start..cursor];
+                if !prefix.is_empty() {
+                    let mut items = Vec::new();
+                    for keyword in CPP_KEYWORDS {
+                        if keyword.starts_with(prefix) && *keyword != prefix {
+                             items.push(keyword.to_string());
+                        }
+                    }
+                    
+                    if !items.is_empty() {
+                        self.core.completion_active = true;
+                        self.core.completion_items = items;
+                        self.core.completion_index = 0;
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+        }
+        
+        if self.core.completion_active {
+            self.core.completion_active = false;
+            self.core.completion_items.clear();
+            self.core.completion_index = 0;
+            cx.notify();
+        }
+    }
+
+    fn confirm_completion(&mut self, cx: &mut Context<Self>) {
+        if !self.core.completion_active || self.core.completion_items.is_empty() {
+            return;
+        }
+        
+        let item = self.core.completion_items[self.core.completion_index].clone();
+        
+        let cursor = self.core.selected_range.start;
+        let content = &self.core.content;
+        let mut word_start = cursor;
+        for (i, ch) in content[..cursor].char_indices().rev() {
+             if !ch.is_alphanumeric() && ch != '_' && ch != '#' {
+                 word_start = i + ch.len_utf8();
+                 break;
+             }
+             word_start = i;
+        }
+        
+        self.core.delete_range(word_start..cursor);
+        self.core.insert_text(&item);
+        
+        self.core.completion_active = false;
+        self.core.completion_items.clear();
+        self.core.completion_index = 0;
+        
         cx.notify();
     }
 
     fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.core.insert_text(text);
-        println!("{}", self.core.content);
+        self.update_completion(cx);
+        // println!("{}", self.core.content); // Removed spammy print
         cx.notify();
     }
 
     fn delete_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
         self.core.delete_range(range);
-        println!("{}", self.core.content);
+        self.update_completion(cx);
+        // println!("{}", self.core.content); // Removed spammy print
         cx.notify();
     }
 
@@ -529,10 +613,18 @@ impl CodeEditor {
     }
 
     fn enter(&mut self, _: &Enter, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.core.completion_active {
+            self.confirm_completion(cx);
+            return;
+        }
         self.insert_text("\n", cx);
     }
 
     fn tab(&mut self, _: &Tab, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.core.completion_active {
+            self.confirm_completion(cx);
+            return;
+        }
         self.insert_text("\t", cx);
     }
 
@@ -623,6 +715,14 @@ impl CodeEditor {
     }
 
     fn move_up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
+        if self.core.completion_active {
+            if self.core.completion_index > 0 {
+                self.core.completion_index -= 1;
+                cx.notify();
+            }
+            return;
+        }
+
         let content = self.core.content.to_string();
         let head = if self.core.selection_anchor == self.core.selected_range.start {
             self.core.selected_range.end
@@ -652,6 +752,14 @@ impl CodeEditor {
     }
 
     fn move_down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
+        if self.core.completion_active {
+            if self.core.completion_index < self.core.completion_items.len().saturating_sub(1) {
+                self.core.completion_index += 1;
+                cx.notify();
+            }
+            return;
+        }
+
         let content = self.core.content.to_string();
         let head = if self.core.selection_anchor == self.core.selected_range.start {
             self.core.selected_range.end
@@ -838,7 +946,7 @@ impl EntityInputHandler for CodeEditor {
         let line_count = content.split('\n').count().max(1);
         let max_digits = line_count.to_string().len();
 
-        let line_height = self.layout.line_height();
+        let _line_height = self.layout.line_height();
         let text_x = self.layout.text_x(bounds, max_digits);
         
         let mut line_index = self.layout.line_index_for_y(bounds, point.y);
@@ -875,13 +983,16 @@ fn code_editor_canvas(editor: Entity<CodeEditor>, focus_handle: FocusHandle) -> 
                 editor.layout.last_bounds = Some(bounds);
             });
             
-            let (layout, content, selection_anchor, selected_range) = {
+            let (layout, content, selection_anchor, selected_range, completion_active, completion_items, completion_index) = {
                 let state = editor.read(cx);
                 (
                     state.layout, 
                     state.core.content.clone(), 
                     state.core.selection_anchor, 
-                    state.core.selected_range.clone()
+                    state.core.selected_range.clone(),
+                    state.core.completion_active,
+                    state.core.completion_items.clone(),
+                    state.core.completion_index
                 )
             };
 
@@ -1007,6 +1118,75 @@ fn code_editor_canvas(editor: Entity<CodeEditor>, focus_handle: FocusHandle) -> 
                         let cursor_y = layout.line_y(bounds, line);
                         let cursor_bounds = Bounds::new(point(cursor_x, cursor_y), size(px(1.0), line_height));
                         window.paint_quad(fill(cursor_bounds, rgb(0xffffffff)));
+                    }
+                    // Draw Completion Menu
+                    if completion_active && !completion_items.is_empty() {
+                        let (line, _, line_start) = CodeEditor::line_col_for_index(&content, head);
+                        let line_text = lines.get(line).copied().unwrap_or("");
+                        let line_shape = CodeEditor::shape_code_line(window, line_text, font_size);
+                        let local_index = head.saturating_sub(line_start);
+                        let cursor_x = text_x + line_shape.x_for_index(local_index);
+                        let cursor_y = layout.line_y(bounds, line);
+                        
+                        let menu_x = cursor_x;
+                        let menu_y = cursor_y + line_height;
+                        
+                        // Dynamic sizing based on font size and content
+                        let item_height = layout.line_height();
+                        let font_size = layout.font_size;
+                        
+                        // Calculate width based on max item length
+                        let max_len = completion_items.iter().map(|s| s.len()).max().unwrap_or(10);
+                        let char_width = font_size * 0.75; // Approximation
+                        let padding_x = px(16.0);
+                        let menu_width = (char_width * max_len as f32 + padding_x).max(px(150.0));
+
+                        // Handle scrolling for completion items if needed, for now just show top 10
+                        let start_index = if completion_index >= 10 {
+                            completion_index - 9
+                        } else {
+                            0
+                        };
+                        let display_count = completion_items.len().min(10);
+                        let menu_height = item_height * display_count as f32;
+                        
+                        let menu_bounds = Bounds::new(
+                            point(menu_x, menu_y),
+                            size(menu_width, menu_height)
+                        );
+                        
+                        let border_width = px(1.0);
+                        let border_bounds = Bounds::from_corners(
+                            point(menu_x - border_width, menu_y - border_width),
+                            point(menu_x + menu_width + border_width, menu_y + menu_height + border_width)
+                        );
+                        window.paint_quad(fill(border_bounds, rgb(0x454545)));
+                        window.paint_quad(fill(menu_bounds, rgb(0x252526)));
+                        
+                        // Items
+                        let items_to_show = completion_items.iter().skip(start_index).take(10);
+                        for (i, item) in items_to_show.enumerate() {
+                            let actual_index = start_index + i;
+                            let item_y = menu_y + item_height * i as f32;
+                            let item_bounds = Bounds::new(
+                                point(menu_x, item_y),
+                                size(menu_width, item_height)
+                            );
+                            
+                            if actual_index == completion_index {
+                                window.paint_quad(fill(item_bounds, rgb(0x04395e)));
+                            }
+                            
+                            let text_shape = CodeEditor::shape_line(
+                                window, 
+                                item, 
+                                rgb(0xcccccc).into(), 
+                                font_size
+                            );
+                            
+                            let text_padding_x = px(8.0);
+                            text_shape.paint(point(menu_x + text_padding_x, item_y), item_height, window, cx).ok();
+                        }
                     }
                 });
             });

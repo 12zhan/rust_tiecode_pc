@@ -959,6 +959,7 @@ impl EntityInputHandler for CodeEditor {
         window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
+        let bounds = self.layout.last_bounds.unwrap_or(bounds);
         let range = self.range_from_utf16(&range_utf16);
         let content = self.core.content.as_str();
         

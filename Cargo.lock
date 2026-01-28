@@ -5246,6 +5246,8 @@ name = "tiecode"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "core-graphics 0.25.0",
+ "core-text",
  "env_logger",
  "gpui",
  "libloading",

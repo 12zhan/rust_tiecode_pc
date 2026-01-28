@@ -1,8 +1,9 @@
 use std::ops::Range;
+use ropey::Rope;
 use super::completion::CompletionItem;
 
 pub struct EditorCore {
-    pub content: String,
+    pub content: Rope,
     pub selected_range: Range<usize>,
     pub selection_anchor: usize,
     pub marked_range: Option<Range<usize>>,
@@ -15,7 +16,7 @@ pub struct EditorCore {
 impl EditorCore {
     pub fn new() -> Self {
         Self {
-            content: String::new(),
+            content: Rope::new(),
             selected_range: 0..0,
             selection_anchor: 0,
             marked_range: None,
@@ -43,23 +44,35 @@ impl EditorCore {
 
     pub fn insert_text(&mut self, text: &str) {
         let range = self.selected_range.clone();
-        let mut new_content = String::new();
-        new_content.push_str(&self.content[0..range.start]);
-        new_content.push_str(text);
-        new_content.push_str(&self.content[range.end..]);
-        let cursor = range.start + text.len();
-        self.content = new_content;
-        self.selected_range = cursor..cursor;
-        self.selection_anchor = cursor;
+        
+        // Convert byte index to char index for Rope
+        let start_char_idx = self.content.byte_to_char(range.start);
+        let end_char_idx = self.content.byte_to_char(range.end);
+        
+        // Remove selected text if any
+        if start_char_idx != end_char_idx {
+             self.content.remove(start_char_idx..end_char_idx);
+        }
+        
+        // Insert new text
+        self.content.insert(start_char_idx, text);
+        
+        // Calculate new cursor position (byte index)
+        let new_cursor_byte = range.start + text.len();
+        
+        self.selected_range = new_cursor_byte..new_cursor_byte;
+        self.selection_anchor = new_cursor_byte;
         self.marked_range = None;
         self.preferred_column = None;
     }
 
     pub fn delete_range(&mut self, range: Range<usize>) {
-        let mut new_content = String::new();
-        new_content.push_str(&self.content[0..range.start]);
-        new_content.push_str(&self.content[range.end..]);
-        self.content = new_content;
+        // Convert byte range to char range for Rope
+        let start_char_idx = self.content.byte_to_char(range.start);
+        let end_char_idx = self.content.byte_to_char(range.end);
+        
+        self.content.remove(start_char_idx..end_char_idx);
+        
         self.selected_range = range.start..range.start;
         self.selection_anchor = range.start;
         self.marked_range = None;

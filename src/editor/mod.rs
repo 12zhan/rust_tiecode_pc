@@ -1,4 +1,5 @@
 use gpui::*;
+use ropey::Rope;
 use std::ops::Range;
 
 pub mod core;
@@ -45,7 +46,7 @@ impl CodeEditor {
     }
 
     pub fn set_content(&mut self, content: String, cx: &mut Context<Self>) {
-        self.core.content = content;
+        self.core.content = Rope::from(content);
         self.core.selected_range = 0..0;
         self.core.selection_anchor = 0;
         self.core.marked_range = None;
@@ -81,16 +82,28 @@ impl CodeEditor {
             let content = &self.core.content;
             
             let mut word_start = cursor;
-            for (i, ch) in content[..cursor].char_indices().rev() {
-                 if !ch.is_alphanumeric() && ch != '_' && ch != '#' {
-                     word_start = i + ch.len_utf8();
-                     break;
-                 }
-                 word_start = i;
+            
+            let mut current_idx = cursor;
+            while current_idx > 0 {
+                let char_idx = content.byte_to_char(current_idx);
+                if char_idx == 0 && current_idx > 0 { break; }
+                let prev_char_idx = char_idx - 1;
+                let ch = content.char(prev_char_idx);
+                let char_len = ch.len_utf8();
+                let prev_byte_idx = current_idx - char_len;
+                
+                if !ch.is_alphanumeric() && ch != '_' && ch != '#' {
+                    word_start = current_idx;
+                    break;
+                }
+                current_idx = prev_byte_idx;
+                word_start = current_idx;
             }
             
             if word_start < cursor {
-                let prefix = &content[word_start..cursor];
+                let prefix_string = content.byte_slice(word_start..cursor).to_string();
+                let prefix = prefix_string.as_str();
+                
                 // Require prefix to have length > 0 to start completion
                 // But wait, the user said "input space and delete" triggers completion.
                 // The issue was "completion shows all words".
@@ -151,12 +164,28 @@ impl CodeEditor {
             let cursor = self.core.selected_range.start;
             let content = &self.core.content;
             let mut word_start = cursor;
-            for (i, ch) in content[..cursor].char_indices().rev() {
-                 if !ch.is_alphanumeric() && ch != '_' && ch != '#' {
-                     word_start = i + ch.len_utf8();
-                     break;
-                 }
-                 word_start = i;
+            
+            // Iterate backwards from cursor to find word start
+            // Rope doesn't support efficient reverse char iteration from an index easily via slices
+            // So we use char_at logic
+            let mut current_idx = cursor;
+            while current_idx > 0 {
+                let char_idx = content.byte_to_char(current_idx);
+                if char_idx == 0 && current_idx > 0 {
+                     // Should not happen if cursor is valid char boundary
+                     break; 
+                }
+                let prev_char_idx = char_idx - 1;
+                let ch = content.char(prev_char_idx);
+                let char_len = ch.len_utf8();
+                let prev_byte_idx = current_idx - char_len;
+                
+                if !ch.is_alphanumeric() && ch != '_' && ch != '#' {
+                    word_start = current_idx;
+                    break;
+                }
+                current_idx = prev_byte_idx;
+                word_start = current_idx;
             }
             
             // Delete the prefix
@@ -172,7 +201,6 @@ impl CodeEditor {
     }
 
     fn backspace(&mut self, _: &Backspace, _window: &mut Window, cx: &mut Context<Self>) {
-        let content = self.core.content.to_string();
         if !self.core.selected_range.is_empty() {
             self.delete_range(self.core.selected_range.clone(), cx);
             return;
@@ -181,43 +209,42 @@ impl CodeEditor {
         if cursor == 0 {
             return;
         }
-        let prev = Self::prev_char_index(&content, cursor);
+        let prev = Self::prev_char_index(&self.core.content, cursor);
         self.delete_range(prev..cursor, cx);
     }
 
     fn delete(&mut self, _: &Delete, _window: &mut Window, cx: &mut Context<Self>) {
-        let content = self.core.content.to_string();
         if !self.core.selected_range.is_empty() {
             self.delete_range(self.core.selected_range.clone(), cx);
             return;
         }
         let cursor = self.core.selected_range.end;
-        if cursor >= content.len() {
+        if cursor >= self.core.content.len_bytes() {
             return;
         }
-        let next = Self::next_char_index(&content, cursor);
+        let next = Self::next_char_index(&self.core.content, cursor);
         self.delete_range(cursor..next, cx);
     }
 
     fn delete_line(&mut self, _: &DeleteLine, _window: &mut Window, cx: &mut Context<Self>) {
-        let content = self.core.content.to_string();
         let cursor = self.core.selected_range.start;
-        let (line_idx, _, line_start) = Self::line_col_for_index(&content, cursor);
-        let starts = Self::line_start_indices(&content);
+        let line_idx = self.core.content.byte_to_line(cursor);
+        let line_start = self.core.content.line_to_byte(line_idx);
         
-        let range_end = if line_idx + 1 < starts.len() {
-            starts[line_idx + 1]
+        let next_line_idx = line_idx + 1;
+        let range_end = if next_line_idx < self.core.content.len_lines() {
+            self.core.content.line_to_byte(next_line_idx)
         } else {
-            content.len()
+            self.core.content.len_bytes()
         };
         
         let mut range_start = line_start;
         
         // If last line, try to delete previous newline
-        if line_idx + 1 >= starts.len() && range_start > 0 {
+        if next_line_idx >= self.core.content.len_lines() && range_start > 0 {
              range_start -= 1;
              // Check for \r before \n
-             if range_start > 0 && content.as_bytes()[range_start - 1] == b'\r' {
+             if range_start > 0 && self.core.content.byte(range_start - 1) == b'\r' {
                  range_start -= 1;
              }
         }
@@ -259,7 +286,7 @@ impl CodeEditor {
         if self.core.selected_range.is_empty() {
             return;
         }
-        let text = self.core.content[self.core.selected_range.clone()].to_string();
+        let text = self.core.content.byte_slice(self.core.selected_range.clone()).to_string();
         cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
@@ -267,7 +294,7 @@ impl CodeEditor {
         if self.core.selected_range.is_empty() {
             return;
         }
-        let text = self.core.content[self.core.selected_range.clone()].to_string();
+        let text = self.core.content.byte_slice(self.core.selected_range.clone()).to_string();
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         self.delete_range(self.core.selected_range.clone(), cx);
     }
@@ -294,40 +321,40 @@ impl CodeEditor {
     }
 
     fn move_left(&mut self, _: &Left, window: &mut Window, cx: &mut Context<Self>) {
-        let content = self.core.content.to_string();
+        let content = &self.core.content;
         if window.modifiers().shift {
             let head = if self.core.selection_anchor == self.core.selected_range.start {
                 self.core.selected_range.end
             } else {
                 self.core.selected_range.start
             };
-            let prev = Self::prev_char_index(&content, head);
+            let prev = Self::prev_char_index(content, head);
             self.select_to(prev, cx);
         } else {
             if !self.core.selected_range.is_empty() {
                 self.set_cursor(self.core.selected_range.start, cx);
             } else {
-                let prev = Self::prev_char_index(&content, self.core.selected_range.start);
+                let prev = Self::prev_char_index(content, self.core.selected_range.start);
                 self.set_cursor(prev, cx);
             }
         }
     }
 
     fn move_right(&mut self, _: &Right, window: &mut Window, cx: &mut Context<Self>) {
-        let content = self.core.content.to_string();
+        let content = &self.core.content;
         if window.modifiers().shift {
             let head = if self.core.selection_anchor == self.core.selected_range.start {
                 self.core.selected_range.end
             } else {
                 self.core.selected_range.start
             };
-            let next = Self::next_char_index(&content, head);
+            let next = Self::next_char_index(content, head);
             self.select_to(next, cx);
         } else {
             if !self.core.selected_range.is_empty() {
                 self.set_cursor(self.core.selected_range.end, cx);
             } else {
-                let next = Self::next_char_index(&content, self.core.selected_range.end);
+                let next = Self::next_char_index(content, self.core.selected_range.end);
                 self.set_cursor(next, cx);
             }
         }
@@ -342,7 +369,7 @@ impl CodeEditor {
             return;
         }
 
-        let content = self.core.content.to_string();
+        let content = &self.core.content;
         let head = if self.core.selection_anchor == self.core.selected_range.start {
             self.core.selected_range.end
         } else {
@@ -358,10 +385,10 @@ impl CodeEditor {
             }
         };
 
-        let (line, col, _) = Self::line_col_for_index(&content, cursor);
+        let (line, col, _) = Self::line_col_for_index(content, cursor);
         let preferred = self.core.preferred_column.get_or_insert(col);
         let target_line = line.saturating_sub(1);
-        let new_index = Self::index_for_line_col(&content, target_line, *preferred);
+        let new_index = Self::index_for_line_col(content, target_line, *preferred);
         
         if window.modifiers().shift {
             self.select_to(new_index, cx);
@@ -379,7 +406,7 @@ impl CodeEditor {
             return;
         }
 
-        let content = self.core.content.to_string();
+        let content = &self.core.content;
         let head = if self.core.selection_anchor == self.core.selected_range.start {
             self.core.selected_range.end
         } else {
@@ -395,12 +422,11 @@ impl CodeEditor {
             }
         };
 
-        let (line, col, _) = Self::line_col_for_index(&content, cursor);
+        let (line, col, _) = Self::line_col_for_index(content, cursor);
         let preferred = self.core.preferred_column.get_or_insert(col);
-        let starts = Self::line_start_indices(&content);
-        let max_line = starts.len().saturating_sub(1);
+        let max_line = content.len_lines().saturating_sub(1);
         let target_line = (line + 1).min(max_line);
-        let new_index = Self::index_for_line_col(&content, target_line, *preferred);
+        let new_index = Self::index_for_line_col(content, target_line, *preferred);
         
         if window.modifiers().shift {
             self.select_to(new_index, cx);
@@ -423,15 +449,14 @@ impl CodeEditor {
             let bounds = self.layout.last_bounds.unwrap_or_default();
             let view_size = bounds.size;
             
-            let lines: Vec<&str> = self.core.content.split('\n').collect();
-            let line_count = lines.len().max(1);
+            let line_count = self.core.content.len_lines().max(1);
             let total_height = self.layout.line_height() * line_count as f32;
             
             // Vertical scroll limit
             let max_scroll_y = (total_height - view_size.height + self.layout.line_height()).max(px(0.0));
             
             // Horizontal scroll limit
-            let max_line_len = lines.iter().map(|l| l.len()).max().unwrap_or(0);
+            let max_line_len = self.core.content.lines().map(|l| l.len_bytes()).max().unwrap_or(0);
             let max_digits = line_count.to_string().len();
             let gutter_width = self.layout.gutter_width(max_digits);
             // Approximation: 0.75 * font_size per byte
@@ -445,73 +470,55 @@ impl CodeEditor {
     }
 
     // Helper functions
-    fn line_start_indices(content: &str) -> Vec<usize> {
-        let mut indices = vec![0];
-        for (i, c) in content.char_indices() {
-            if c == '\n' {
-                indices.push(i + 1);
-            }
-        }
-        indices
-    }
-
-    fn line_col_for_index(content: &str, index: usize) -> (usize, usize, usize) {
-        let starts = Self::line_start_indices(content);
-        let line_index = match starts.binary_search(&index) {
-            Ok(i) => i,
-            Err(i) => i - 1,
-        };
-        let line_start = starts[line_index];
+    fn line_col_for_index(content: &Rope, index: usize) -> (usize, usize, usize) {
+        let line_index = content.byte_to_line(index);
+        let line_start = content.line_to_byte(line_index);
         let col = index - line_start;
         (line_index, col, line_start)
     }
 
-    fn index_for_line_col(content: &str, line: usize, col: usize) -> usize {
-        let starts = Self::line_start_indices(content);
-        if line >= starts.len() {
-            return content.len();
+    fn index_for_line_col(content: &Rope, line: usize, col: usize) -> usize {
+        if line >= content.len_lines() {
+            return content.len_bytes();
         }
-        let line_start = starts[line];
-        let line_end = if line + 1 < starts.len() {
-            starts[line + 1] - 1
-        } else {
-            content.len()
-        };
-        let line_len = line_end - line_start;
-        line_start + col.min(line_len)
+        let line_start = content.line_to_byte(line);
+        let line_slice = content.line(line);
+        let mut len = line_slice.len_bytes();
+        // If not last line, exclude newline
+        if line + 1 < content.len_lines() {
+             // Simple heuristic: if ends with \n, len-1. Rope lines usually include newline.
+             if line_slice.chars().last() == Some('\n') {
+                 len -= 1;
+             }
+        }
+        line_start + col.min(len)
     }
 
-    fn prev_char_index(content: &str, index: usize) -> usize {
+    fn prev_char_index(content: &Rope, index: usize) -> usize {
         if index == 0 {
             return 0;
         }
-        let mut i = index - 1;
-        while !content.is_char_boundary(i) {
-            i -= 1;
+        let char_idx = content.byte_to_char(index);
+        if char_idx == 0 {
+            return 0;
         }
-        i
+        content.char_to_byte(char_idx - 1)
     }
 
-    fn next_char_index(content: &str, index: usize) -> usize {
-        if index >= content.len() {
-            return content.len();
+    fn next_char_index(content: &Rope, index: usize) -> usize {
+        if index >= content.len_bytes() {
+            return content.len_bytes();
         }
-        let mut i = index + 1;
-        while i < content.len() && !content.is_char_boundary(i) {
-            i += 1;
+        let char_idx = content.byte_to_char(index);
+        if char_idx + 1 >= content.len_chars() {
+            return content.len_bytes();
         }
-        i
+        content.char_to_byte(char_idx + 1)
     }
 
     fn offset_to_utf16(&self, offset: usize) -> usize {
-        let mut utf16_offset = 0;
-        for (i, c) in self.core.content.char_indices() {
-            if i >= offset {
-                break;
-            }
-            utf16_offset += c.len_utf16();
-        }
-        utf16_offset
+        let char_idx = self.core.content.byte_to_char(offset);
+        self.core.content.slice(0..char_idx).len_utf16_cu()
     }
 
     fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
@@ -521,25 +528,11 @@ impl CodeEditor {
     }
 
     fn range_from_utf16(&self, range_utf16: &Range<usize>) -> Range<usize> {
-        let mut byte_start = 0;
-        let mut byte_end = 0;
-        let mut current_utf16 = 0;
-        
-        for (i, c) in self.core.content.char_indices() {
-            if current_utf16 == range_utf16.start {
-                byte_start = i;
-            }
-            if current_utf16 == range_utf16.end {
-                byte_end = i;
-                break;
-            }
-            current_utf16 += c.len_utf16();
-        }
-        if current_utf16 < range_utf16.end {
-            byte_end = self.core.content.len();
-        }
-        
-        byte_start..byte_end
+        let start_char = self.core.content.utf16_cu_to_char(range_utf16.start);
+        let end_char = self.core.content.utf16_cu_to_char(range_utf16.end);
+        let start_byte = self.core.content.char_to_byte(start_char);
+        let end_byte = self.core.content.char_to_byte(end_char);
+        start_byte..end_byte
     }
 
     fn shape_line(
@@ -673,7 +666,7 @@ impl EntityInputHandler for CodeEditor {
     ) -> Option<String> {
         let range = self.range_from_utf16(&range_utf16);
         adjusted_range.replace(self.range_to_utf16(&range));
-        Some(self.core.content[range].to_string())
+        Some(self.core.content.byte_slice(range).to_string())
     }
 
     fn selected_text_range(
@@ -716,8 +709,13 @@ impl EntityInputHandler for CodeEditor {
             .or(self.core.marked_range.clone())
             .unwrap_or(self.core.selected_range.clone());
 
-        self.core.content =
-            self.core.content[0..range.start].to_owned() + new_text + &self.core.content[range.end..];
+        let start_char = self.core.content.byte_to_char(range.start);
+        let end_char = self.core.content.byte_to_char(range.end);
+        if start_char < end_char {
+             self.core.content.remove(start_char..end_char);
+        }
+        self.core.content.insert(start_char, new_text);
+
         let new_cursor = range.start + new_text.len();
         self.core.selected_range = new_cursor..new_cursor;
         self.core.selection_anchor = new_cursor;
@@ -741,8 +739,13 @@ impl EntityInputHandler for CodeEditor {
             .or(self.core.marked_range.clone())
             .unwrap_or(self.core.selected_range.clone());
 
-        self.core.content =
-            self.core.content[0..range.start].to_owned() + new_text + &self.core.content[range.end..];
+        let start_char = self.core.content.byte_to_char(range.start);
+        let end_char = self.core.content.byte_to_char(range.end);
+        if start_char < end_char {
+             self.core.content.remove(start_char..end_char);
+        }
+        self.core.content.insert(start_char, new_text);
+
         if !new_text.is_empty() {
             self.core.marked_range = Some(range.start..range.start + new_text.len());
         } else {
@@ -767,24 +770,25 @@ impl EntityInputHandler for CodeEditor {
     ) -> Option<Bounds<Pixels>> {
         let bounds = self.layout.last_bounds.unwrap_or(bounds);
         let range = self.range_from_utf16(&range_utf16);
-        let content = self.core.content.as_str();
+        let content = &self.core.content;
         
         // Calculate max digits
-        let line_count = content.split('\n').count().max(1);
+        let line_count = content.len_lines().max(1);
         let max_digits = line_count.to_string().len();
 
         let (line_index, _, line_start) = Self::line_col_for_index(content, range.start);
         let line_height = self.layout.line_height();
         let text_x = self.layout.text_x(bounds, max_digits);
         let y = self.layout.line_y(bounds, line_index);
-        let starts = Self::line_start_indices(content);
-        let line_end = if line_index + 1 < starts.len() {
-            starts[line_index + 1] - 1
-        } else {
-            content.len()
-        };
-        let line_text = &content[line_start..line_end];
-        let line = Self::shape_code_line(window, line_text, self.layout.font_size);
+        
+        let line_slice = content.line(line_index);
+        let line_len = line_slice.len_bytes();
+        // We want displayed text, so if it has newline, maybe strip it for shaping?
+        // But logic below expects indices to match.
+        // Let's take the whole line slice.
+        let line_text = line_slice.to_string();
+        
+        let line = Self::shape_code_line(window, &line_text, self.layout.font_size);
         let start_x = line.x_for_index(range.start - line_start);
         let end_x = line.x_for_index(range.end - line_start);
         Some(Bounds::from_corners(
@@ -800,30 +804,25 @@ impl EntityInputHandler for CodeEditor {
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
         let bounds = self.layout.last_bounds?;
-        let content = self.core.content.as_str();
+        let content = &self.core.content;
         
         // Calculate max digits
-        let line_count = content.split('\n').count().max(1);
+        let line_count = content.len_lines().max(1);
         let max_digits = line_count.to_string().len();
 
         let _line_height = self.layout.line_height();
         let text_x = self.layout.text_x(bounds, max_digits);
         
         let mut line_index = self.layout.line_index_for_y(bounds, point.y);
-        let starts = Self::line_start_indices(content);
-        if starts.is_empty() {
-            line_index = 0;
-        } else if line_index >= starts.len() {
-            line_index = starts.len() - 1;
+        if line_index >= content.len_lines() {
+            line_index = content.len_lines().saturating_sub(1);
         }
-        let line_start = starts.get(line_index).copied().unwrap_or(0);
-        let line_end = if line_index + 1 < starts.len() {
-            starts[line_index + 1] - 1
-        } else {
-            content.len()
-        };
-        let line_text = &content[line_start..line_end];
-        let line = Self::shape_code_line(window, line_text, self.layout.font_size);
+        
+        let line_start = content.line_to_byte(line_index);
+        let line_slice = content.line(line_index);
+        let line_text = line_slice.to_string();
+        
+        let line = Self::shape_code_line(window, &line_text, self.layout.font_size);
         let local_x = point.x - text_x;
         let utf8_index = line.index_for_x(local_x).unwrap_or(line_text.len());
         Some(self.offset_to_utf16(line_start + utf8_index))
@@ -833,28 +832,31 @@ impl EntityInputHandler for CodeEditor {
 impl CodeEditor {
     fn index_for_point(&self, point: Point<Pixels>, window: &Window) -> Option<usize> {
         let bounds = self.layout.last_bounds?;
-        let content = self.core.content.as_str();
+        let content = &self.core.content;
         
         // Calculate max digits
-        let line_count = content.split('\n').count().max(1);
+        let line_count = content.len_lines().max(1);
         let max_digits = line_count.to_string().len();
         
         let text_x = self.layout.text_x(bounds, max_digits);
         
         let mut line_index = self.layout.line_index_for_y(bounds, point.y);
-        let starts = Self::line_start_indices(content);
-        if starts.is_empty() {
-            line_index = 0;
-        } else if line_index >= starts.len() {
-            line_index = starts.len() - 1;
+        
+        if line_index >= line_count {
+            line_index = line_count.saturating_sub(1);
         }
-        let line_start = starts.get(line_index).copied().unwrap_or(0);
-        let line_end = if line_index + 1 < starts.len() {
-            starts[line_index + 1] - 1
-        } else {
-            content.len()
-        };
-        let line_text = &content[line_start..line_end];
+        
+        let line_start = content.line_to_byte(line_index);
+        let line_slice = content.line(line_index);
+        let mut line_text_string = line_slice.to_string();
+        if line_text_string.ends_with('\n') {
+            line_text_string.pop();
+            if line_text_string.ends_with('\r') {
+                line_text_string.pop();
+            }
+        }
+        let line_text = &line_text_string;
+
         let line = Self::shape_code_line(window, line_text, self.layout.font_size);
         let local_x = point.x - text_x;
         let utf8_index = line.index_for_x(local_x).unwrap_or(line_text.len());
@@ -903,7 +905,21 @@ impl Render for CodeEditor {
             .cursor(CursorStyle::IBeam)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
+            .on_action(cx.listener(Self::backspace))
+            .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::delete_line))
+            .on_action(cx.listener(Self::enter))
+            .on_action(cx.listener(Self::tab))
+            .on_action(cx.listener(Self::shift_tab))
+            .on_action(cx.listener(Self::move_left))
+            .on_action(cx.listener(Self::move_right))
+            .on_action(cx.listener(Self::move_up))
+            .on_action(cx.listener(Self::move_down))
+            .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::cut))
+            .on_action(cx.listener(Self::paste))
             .child(code_editor_canvas(editor, focus_handle))
     }
 }
@@ -937,8 +953,7 @@ pub fn code_editor_canvas(editor: Entity<CodeEditor>, focus_handle: FocusHandle)
             let font_size = layout.font_size;
             let line_height = layout.line_height();
 
-            let lines: Vec<&str> = content.split('\n').collect();
-            let line_count = lines.len().max(1);
+            let line_count = content.len_lines().max(1);
             let max_digits = line_count.to_string().len();
 
             let text_x = layout.text_x(bounds, max_digits);
@@ -951,7 +966,6 @@ pub fn code_editor_canvas(editor: Entity<CodeEditor>, focus_handle: FocusHandle)
             };
 
             window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                let starts = CodeEditor::line_start_indices(&content);
                 let selection = selected_range.clone();
                 let (current_line, _, _) = CodeEditor::line_col_for_index(&content, head);
 
@@ -1000,17 +1014,21 @@ pub fn code_editor_canvas(editor: Entity<CodeEditor>, focus_handle: FocusHandle)
                 // Clipped by text_area_bounds (excludes gutter)
                 window.with_content_mask(Some(ContentMask { bounds: text_area_bounds }), |window| {
                     for i in start_line..end_line {
-                        let line_text = lines.get(i).copied().unwrap_or("");
+                        let line_slice = content.line(i);
+                        let mut line_text_string = line_slice.to_string();
+                        if line_text_string.ends_with('\n') {
+                            line_text_string.pop();
+                            if line_text_string.ends_with('\r') {
+                                line_text_string.pop();
+                            }
+                        }
+                        let line_text = &line_text_string;
                         let y = layout.line_y(bounds, i);
 
                         // Draw Selection Background
                         if !selection.is_empty() {
-                            let line_start = starts.get(i).copied().unwrap_or(0);
-                            let line_end_incl_newline = if i + 1 < starts.len() {
-                                starts[i + 1]
-                            } else {
-                                content.len()
-                            };
+                            let line_start = content.line_to_byte(i);
+                            let line_end_incl_newline = line_start + line_slice.len_bytes();
 
                             let sel_start = selection.start.max(line_start);
                             let sel_end = selection.end.min(line_end_incl_newline);
@@ -1049,7 +1067,16 @@ pub fn code_editor_canvas(editor: Entity<CodeEditor>, focus_handle: FocusHandle)
                     // Draw Cursor (only if visible)
                     let (line, _col, line_start) = CodeEditor::line_col_for_index(&content, head);
                     if line >= start_line && line < end_line {
-                        let line_text = lines.get(line).copied().unwrap_or("");
+                        let line_slice = content.line(line);
+                        let mut line_text_string = line_slice.to_string();
+                        if line_text_string.ends_with('\n') {
+                            line_text_string.pop();
+                            if line_text_string.ends_with('\r') {
+                                line_text_string.pop();
+                            }
+                        }
+                        let line_text = &line_text_string;
+
                         let line_shape = CodeEditor::shape_code_line(window, line_text, font_size);
                         let local_index = head.saturating_sub(line_start);
                         let cursor_x = text_x + line_shape.x_for_index(local_index);
@@ -1060,7 +1087,16 @@ pub fn code_editor_canvas(editor: Entity<CodeEditor>, focus_handle: FocusHandle)
                     // Draw Completion Menu
                     if completion_active && !completion_items.is_empty() {
                         let (line, _, line_start) = CodeEditor::line_col_for_index(&content, head);
-                        let line_text = lines.get(line).copied().unwrap_or("");
+                        let line_slice = content.line(line);
+                        let mut line_text_string = line_slice.to_string();
+                        if line_text_string.ends_with('\n') {
+                            line_text_string.pop();
+                            if line_text_string.ends_with('\r') {
+                                line_text_string.pop();
+                            }
+                        }
+                        let line_text = &line_text_string;
+
                         let line_shape = CodeEditor::shape_code_line(window, line_text, font_size);
                         let local_index = head.saturating_sub(line_start);
                         let cursor_x = text_x + line_shape.x_for_index(local_index);

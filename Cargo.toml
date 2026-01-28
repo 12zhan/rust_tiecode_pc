@@ -18,6 +18,7 @@ serde_json = "1"
 serde_repr = "0.1"
 thiserror = "1"
 smallvec = "1"
+ropey = "1.6.1"
 
 
 [target.'cfg(windows)'.build-dependencies]

@@ -173,14 +173,14 @@ impl EditorLayout {
         (local_y / line_height).floor().max(0.0) as usize
     }
 
-    fn scroll(&mut self, delta: Point<Pixels>) {
+    fn scroll(&mut self, delta: Point<Pixels>, max_scroll: Point<Pixels>) {
         self.scroll_offset = self.scroll_offset + delta;
-        self.scroll_offset.y = self.scroll_offset.y.min(px(0.0));
-        self.scroll_offset.x = self.scroll_offset.x.min(px(0.0));
+        self.scroll_offset.y = self.scroll_offset.y.clamp(-max_scroll.y, px(0.0));
+        self.scroll_offset.x = self.scroll_offset.x.clamp(-max_scroll.x, px(0.0));
     }
 
     fn zoom(&mut self, delta: Pixels) {
-        self.font_size = (self.font_size + delta).max(px(8.0));
+        self.font_size = (self.font_size + delta).clamp(px(6.0), px(100.0));
     }
 
 }
@@ -853,7 +853,28 @@ impl CodeEditor {
             self.layout.zoom(delta);
         } else {
             let delta = event.delta.pixel_delta(px(20.0));
-            self.layout.scroll(delta);
+            
+            let bounds = self.layout.last_bounds.unwrap_or_default();
+            let view_size = bounds.size;
+            
+            let lines: Vec<&str> = self.core.content.split('\n').collect();
+            let line_count = lines.len().max(1);
+            let total_height = self.layout.line_height() * line_count as f32;
+            
+            // Vertical scroll limit: allow scrolling until the last line is visible at the bottom
+            // Plus a little padding (e.g. 1 line)
+            let max_scroll_y = (total_height - view_size.height + self.layout.line_height()).max(px(0.0));
+            
+            // Horizontal scroll limit
+            let max_line_len = lines.iter().map(|l| l.len()).max().unwrap_or(0);
+            let max_digits = line_count.to_string().len();
+            let gutter_width = self.layout.gutter_width(max_digits);
+            // Approximation: 0.75 * font_size per byte (covers ASCII and mostly CJK)
+            let char_width = self.layout.font_size * 0.75; 
+            let content_width = gutter_width + px(40.0) + (max_line_len as f32 * char_width);
+            let max_scroll_x = (content_width - view_size.width).max(px(0.0));
+
+            self.layout.scroll(delta, point(max_scroll_x, max_scroll_y));
         }
         cx.notify();
     }

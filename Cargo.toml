@@ -26,7 +26,3 @@ core-text = "=20.0.0"
 winres = "0.1"
 cc = "1"
 
-
-[patch.crates-io]
-core-graphics = { version = "=0.24.0" }
-core-text = { version = "=20.0.0" }

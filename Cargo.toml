@@ -18,9 +18,7 @@ serde_json = "1"
 serde_repr = "0.1"
 thiserror = "1"
 smallvec = "1"
-zed-font-kit = "0.14.1-zed"
-core-graphics = "=0.24.0"
-core-text = "=20.0.0"
+zed-font-kit = { version = "0.14.1-zed", features = ["loader-coretext", "source-coretext"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

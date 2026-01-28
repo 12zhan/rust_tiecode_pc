@@ -25,3 +25,6 @@ zed-font-kit = "0.14.1-zed"
 winres = "0.1"
 cc = "1"
 
+[patch.crates-io]
+core-graphics = "=0.25.0"
+core-text = "=21.1.0"

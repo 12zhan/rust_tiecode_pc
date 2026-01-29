@@ -37,6 +37,10 @@ fn main() {
         .header("native/sweetline/src/include/c_sweetline.h")
         .clang_arg("-Inative/sweetline/src/include")
         .clang_arg("-xc++")
+        // 只生成 sl_ 开头的类型和函数，避免引入 std::* 导致的 _Tp 错误
+        .allowlist_function("sl_.*")
+        .allowlist_type("sl_.*")
+        .allowlist_var("sl_.*")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .expect("Unable to generate bindings");

@@ -152,23 +152,38 @@ impl EditorCore {
     // Internal helper that doesn't manage transaction/selection update logic directly (or does it?)
     // Actually `replace_range` in previous code managed history.
     fn replace_range_internal(&mut self, range: Range<usize>, text: &str) {
-        let start_char_idx = self.content.byte_to_char(range.start);
-        let end_char_idx = self.content.byte_to_char(range.end);
-        
-        if start_char_idx < end_char_idx {
-             let deleted_text = self.content.slice(start_char_idx..end_char_idx).to_string();
-             self.content.remove(start_char_idx..end_char_idx);
-             self.history.push(EditOperation::Delete { 
-                 range: range.clone(), 
-                 text: deleted_text 
-             });
+        let len = self.content.len_bytes();
+        let start = range.start.min(len);
+        let end = range.end.min(len);
+
+        if start > end {
+            eprintln!(
+                "Warning: replace_range_internal invalid range: {}..{}",
+                start, end
+            );
+            return;
         }
-        
+
+        let start_char_idx = self.content.byte_to_char(start);
+        let end_char_idx = self.content.byte_to_char(end);
+
+        if start_char_idx < end_char_idx {
+            let deleted_text = self
+                .content
+                .slice(start_char_idx..end_char_idx)
+                .to_string();
+            self.content.remove(start_char_idx..end_char_idx);
+            self.history.push(EditOperation::Delete {
+                range: start..end,
+                text: deleted_text,
+            });
+        }
+
         if !text.is_empty() {
             self.content.insert(start_char_idx, text);
-            self.history.push(EditOperation::Insert { 
-                range: range.start..range.start + text.len(), 
-                text: text.to_string() 
+            self.history.push(EditOperation::Insert {
+                range: start..start + text.len(),
+                text: text.to_string(),
             });
         }
     }

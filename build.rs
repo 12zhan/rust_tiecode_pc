@@ -18,7 +18,7 @@ fn main() {
     // 2. 编译 SweetLine C++ 静态库
     let dst = cmake::Config::new("native/sweetline")
         .define("STATIC_LIB", "ON")
-        .define("CMAKE_BUILD_TYPE", "Release")
+        .profile("Release")
         .build();
 
     println!("cargo:rustc-link-search=native={}/lib", dst.display());

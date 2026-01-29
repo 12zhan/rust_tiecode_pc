@@ -70,6 +70,17 @@ impl Engine {
             }
         }
     }
+
+    pub fn get_style_name(&self, style_id: u32) -> Option<String> {
+        unsafe {
+            let ptr = sl_engine_get_style_name(self.handle, style_id as i32);
+            if ptr.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+            }
+        }
+    }
 }
 
 impl Drop for Engine {

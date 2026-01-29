@@ -1,0 +1,361 @@
+pub const CPP_GRAMMAR: &str = r##"{
+  "name": "CPP",
+  "fileExtensions": [".cpp", ".h", ".hpp", ".cc", ".c", ".hh"],
+  "styles": [
+    { "name": "keyword", "foreground": "#569cd6", "tags": ["bold"] },
+    { "name": "string", "foreground": "#ce9178" },
+    { "name": "comment", "foreground": "#6a9955" },
+    { "name": "number", "foreground": "#b5cea8" },
+    { "name": "type", "foreground": "#4ec9b0" },
+    { "name": "preprocessor", "foreground": "#c586c0" },
+    { "name": "function", "foreground": "#dcdcaa" }
+  ],
+  "states": {
+    "default": [
+      { "pattern": "//.*", "style": "comment" },
+      { "pattern": "/\\*", "state": "block_comment", "style": "comment" },
+      { "pattern": "\"(?:[^\"\\\\]|\\\\.)*\"", "style": "string" },
+      { "pattern": "'(?:[^'\\\\]|\\\\.)*'", "style": "string" },
+      { "pattern": "#\\s*\\w+", "style": "preprocessor" },
+      { "pattern": "\\b(?:if|else|while|for|return|class|struct|public|private|protected|virtual|override|namespace|using|template|typename|void|int|float|double|bool|const|static|auto|friend|explicit|constexpr|nullptr|true|false|switch|case|default|break|continue|do|try|catch|throw|sizeof|alignof|alignas|decltype|noexcept|static_assert|static_cast|dynamic_cast|const_cast|reinterpret_cast|new|delete|operator|this|enum|union|typedef|char|short|long|unsigned|signed)\\b", "style": "keyword" },
+      { "pattern": "\\b[0-9]+(?:\\.[0-9]*)?f?\\b", "style": "number" },
+      { "pattern": "\\b0x[0-9a-fA-F]+\\b", "style": "number" },
+      { "pattern": "\\b[A-Z][a-zA-Z0-9_]*\\b", "style": "type" },
+      { "pattern": "\\b[a-zA-Z_][a-zA-Z0-9_]*(?=\\()", "style": "function" }
+    ],
+    "block_comment": [
+      { "pattern": "\\*/", "state": "default", "style": "comment" },
+      { "pattern": ".", "style": "comment" }
+    ]
+  }
+}"##;
+
+pub const JIESHENG_GRAMMAR: &str = r##"{
+  "name": "tiecode",
+  "fileExtensions": [".t"],
+  "variables": {
+    "identifierStart": "[\\p{Han}\\w_$]+",
+    "identifierPart": "[\\p{Han}\\w_$0-9]*",
+    "identifier": "${identifierStart}${identifierPart}",
+    "whiteSpace": "[ \\t\\f]",
+    "any": "[\\S\\s]",
+    "classExtends": "(?:${whiteSpace}+(:)${whiteSpace}+${type})?"
+  },
+  "styles": [
+    {
+      "name": "keyword",
+      "foreground": "#FF569CD6",
+      "tags": ["bold", "italic"]
+    },
+    {
+      "name": "string",
+      "foreground": "#FFBD63C5"
+    },
+    {
+      "name": "number",
+      "foreground": "#FFE4FAD5"
+    },
+    {
+      "name": "comment",
+      "foreground": "#FF60AE6F"
+    },
+    {
+      "name": "class",
+      "foreground": "#FF4EC9B0"
+    },
+    {
+      "name": "method",
+      "foreground": "#FF9CDCFE"
+    },
+    {
+      "name": "variable",
+      "foreground": "#FF9B9BC8"
+    },
+    {
+      "name": "punctuation",
+      "foreground": "#FFD69D85"
+    },
+    {
+      "name": "annotation",
+      "foreground": "#FFFFFD9B"
+    }
+  ],
+  "variables": {
+    "identifierStart": "[\\p{Han}\\w_$]+",
+    "identifierPart": "[\\p{Han}\\w_$0-9]*",
+    "identifier": "${identifierStart}${identifierPart}",
+    "whiteSpace": "[ \\t\\f]",
+    "any": "[\\S\\s]",
+    "classExtends": "(?:${whiteSpace}+(:)${whiteSpace}+${type})?",
+    "embedCodeRefThis": "(#)(this)",
+    "embedCodeRefClass": "(#)(cls|ncls)(<)(${identifier})(>)"
+  },
+  "states": {
+    "default": [
+      {
+        "pattern": "\\b(类)\\b${whiteSpace}+(${identifier})",
+        "styles": [1, "keyword", 2, "class"],
+        "state": "typeDeclare"
+      },
+      {
+        "pattern": "\\b(创建)\\b${whiteSpace}+(${identifier})",
+        "styles": [1, "keyword", 2, "class"]
+      },
+      {
+        "pattern": "(变量)${whiteSpace}+(${identifier})(?:${whiteSpace}*(:)${whiteSpace}*)?",
+        "styles": [1, "keyword", 2, "variable", 3, "punctuation"],
+        "state": "typeDeclare"
+      },
+      {
+        "pattern": "(事件)${whiteSpace}+(${identifier})${whiteSpace}*(:)${whiteSpace}*(${identifier})${whiteSpace}*(\\()",
+        "styles": [1, "keyword", 2, "variable", 3, "punctuation", 4, "method", 5, "punctuation"]
+      },
+      {
+        "pattern": "\\b(包名|类|继承|变量|常量|方法|属性写|属性读|属性|定义事件|事件|结束|为|真|假|空|本对象|父对象|变体型)\\b",
+        "styles": [1, "keyword"]
+      },
+      {
+        "pattern": "\\b(如果|且|或|则|否则|假如|是|循环|跳过循环|退出循环|订阅事件|属于|返回|创建|等待)\\b",
+        "styles": [1, "keyword"]
+      },
+      {
+        "pattern": "\\b(code)\\b",
+        "styles": [1, "keyword"],
+        "state": "singleLineEmbedCode"
+      },
+      {
+        "pattern": "(@)${whiteSpace}*(code)",
+        "styles": [1, "punctuation", 2, "keyword"],
+        "state": "multiLineEmbedCode"
+      },
+      {
+        "pattern": "(@)${whiteSpace}*(${identifier})",
+        "styles": [1, "punctuation", 2, "annotation"]
+      },
+      {
+        "pattern": "(${identifier})(<)(${identifier})(>)",
+        "styles": [1, "class", 2, "punctuation", 3, "class", 4, "punctuation"]
+      },
+      {
+        "pattern": "(${identifier})(<)(${identifier})(,)(${identifier})(>)",
+        "styles": [1, "class", 2, "punctuation", 3, "class", 4, "punctuation", 5, "class", 6, "punctuation"]
+      },
+      {
+        "pattern": "(${identifier})(<)(${identifier})(>)(,)${whiteSpace}*(<)(${identifier})(>)",
+        "styles": [1, "class", 2, "punctuation", 3, "class", 4, "punctuation", 5, "punctuation", 6, "class", 7, "punctuation"]
+      },
+      {
+        "pattern": "(${identifier})(<)(${identifier})(<)(${identifier})(>)(>)",
+        "styles": [1, "class", 2, "punctuation", 3, "class", 4, "punctuation", 5, "class", 6, "punctuation", 7, "punctuation"]
+      },
+      {
+        "pattern": "(${identifier})(<)(${identifier})(>)",
+        "styles": [1, "class", 2, "punctuation", 3, "class", 4, "punctuation"]
+      },
+      {
+        "pattern": "(${identifier})${whiteSpace}*(:)${whiteSpace}*(${identifier})${whiteSpace}*([,)])",
+        "styles": [1, "variable", 2, "punctuation", 3, "class", 4, "punctuation"]
+      },
+      {
+        "pattern": "(${identifier})${whiteSpace}*(\\()",
+        "styles": [1, "method", 2, "punctuation"]
+      },
+      {
+        "pattern": "\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*'",
+        "style": "string"
+      },
+      {
+        "pattern": "\\b(?:[0-9]*\\.?[0-9]+(?:[eE][+-]?[0-9]+)?[fFdD]?)\\b",
+        "style": "number"
+      },
+      {
+        "pattern": "\\[\\[",
+        "style": "string",
+        "state": "longString"
+      },
+      {
+        "pattern": "/\\*",
+        "style": "comment",
+        "state": "longComment"
+      },
+      {
+        "pattern": "//${any}*",
+        "style": "comment"
+      },
+      {
+        "pattern": "[.()\\[\\]?@%+\\-*/<>=,{}:]",
+        "style": "punctuation"
+      }
+    ],
+    "typeDeclare": [
+      {
+        "pattern": "[<>,\\[\\]:]",
+        "style": "punctuation"
+      },
+      {
+        "pattern": "=",
+        "style": "punctuation",
+        "state": "default"
+      },
+      {
+        "pattern": "${identifier}",
+        "style": "class"
+      },
+      {
+        "onLineEndState": "default"
+      }
+    ],
+    "longString": [
+      {
+        "pattern": "\\]\\]",
+        "style": "string",
+        "state": "default"
+      },
+      {
+        "pattern": "${any}",
+        "style": "string"
+      }
+    ],
+    "longComment": [
+      {
+        "pattern": "\\*/",
+        "style": "comment",
+        "state": "default"
+      },
+      {
+        "pattern": "${any}",
+        "style": "comment"
+      }
+    ],
+    "singleLineEmbedCode": [
+      {
+        "pattern": "${embedCodeRefThis}",
+        "styles": [1, "punctuation", 2, "keyword"]
+      },
+      {
+        "pattern": "${embedCodeRefClass}",
+        "styles": [1, "punctuation", 2, "keyword", 3, "punctuation", 4, "class", 5, "punctuation"]
+      },
+      {
+        "onLineEndState": "default"
+      }
+    ],
+    "multiLineEmbedCode": [
+      {
+        "pattern": "${embedCodeRefThis}",
+        "styles": [1, "punctuation", 2, "keyword"]
+      },
+      {
+        "pattern": "${embedCodeRefClass}",
+        "styles": [1, "punctuation", 2, "keyword", 3, "punctuation", 4, "class", 5, "punctuation"]
+      },
+      {
+        "pattern": "(@)${whiteSpace}*(end)",
+        "styles": [1, "punctuation", 2, "keyword"],
+        "state": "default"
+      }
+    ]
+  },
+  "states": {
+    "default": [
+      {
+        "pattern": "\\b(类)\\b${whiteSpace}+(${identifier})",
+        "styles": [1, "keyword", 2, "class"],
+        "state": "typeDeclare"
+      },
+      {
+        "pattern": "\\b(创建)\\b${whiteSpace}+(${identifier})",
+        "styles": [1, "keyword", 2, "class"]
+      },
+      {
+        "pattern": "(变量)${whiteSpace}+(${identifier})(?:${whiteSpace}*(:)${whiteSpace}*(${identifier}))?",
+        "styles": [1, "keyword", 2, "variable", 3, "punctuation", 4, "class"]
+      },
+      {
+        "pattern": "(事件)${whiteSpace}+(${identifier})${whiteSpace}*(:)${whiteSpace}*(${identifier})${whiteSpace}*(\\()",
+        "styles": [1, "keyword", 2, "variable", 3, "punctuation", 4, "method", 5, "punctuation"]
+      },
+      {
+        "pattern": "\\b(包名|类|继承|变量|常量|方法|属性写|属性读|属性|定义事件|事件|结束|为|真|假|空|本对象|父对象|变体型)\\b",
+        "styles": [1, "keyword"]
+      },
+      {
+        "pattern": "\\b(如果|且|或|则|否则|假如|是|循环|跳过循环|退出循环|订阅事件|属于|返回|创建|等待)\\b",
+        "styles": [1, "keyword"]
+      },
+      {
+        "pattern": "(@)${whiteSpace}*(${identifier})",
+        "styles": [1, "punctuation", 2, "annotation"]
+      },
+      {
+        "pattern": "(${identifier})${whiteSpace}*(:)${whiteSpace}*(${identifier})${whiteSpace}*([,)])",
+        "styles": [1, "variable", 2, "punctuation", 3, "class", 4, "punctuation"]
+      },
+      {
+        "pattern": "(${identifier})${whiteSpace}*(\\()",
+        "styles": [1, "method", 2, "punctuation"]
+      },
+      {
+        "pattern": "\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*'",
+        "style": "string"
+      },
+      {
+        "pattern": "\\b(?:[0-9]*\\.?[0-9]+(?:[eE][+-]?[0-9]+)?[fFdD]?)\\b",
+        "style": "number"
+      },
+      {
+        "pattern": "\\[\\[",
+        "style": "string",
+        "state": "longString"
+      },
+      {
+        "pattern": "/\\*",
+        "style": "comment",
+        "state": "longComment"
+      },
+      {
+        "pattern": "//${any}*",
+        "style": "comment"
+      },
+      {
+        "pattern": "[.()\\[\\]?@%+\\-*/<>=,{}:]",
+        "style": "punctuation"
+      }
+    ],
+    "typeDeclare": [
+      {
+        "pattern": "[<>,\\[\\]:]",
+        "style": "punctuation"
+      },
+      {
+        "pattern": "${identifier}",
+        "style": "class"
+      },
+      {
+        "onLineEndState": "default"
+      }
+    ],
+    "longString": [
+      {
+        "pattern": "\\]\\]",
+        "style": "string",
+        "state": "default"
+      },
+      {
+        "pattern": "${any}",
+        "style": "string"
+      }
+    ],
+    "longComment": [
+      {
+        "pattern": "\\*/",
+        "style": "comment",
+        "state": "default"
+      },
+      {
+        "pattern": "${any}",
+        "style": "comment"
+      }
+    ]
+  }
+}"##;

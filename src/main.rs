@@ -4,8 +4,8 @@ mod editor;
 pub mod lsp;
 
 use editor::{
-    Backspace, CodeEditor, Copy, CtrlShiftTab, Cut, Delete, DeleteLine, Down, Enter, Left, Paste,
-    Redo, Right, ShiftTab, Tab, Undo, Up,
+    Backspace, CancelFind, CodeEditor, Copy, CtrlShiftTab, Cut, Delete, DeleteLine, Down, Enter,
+    FindNext, FindPrev, Left, Paste, Redo, Right, ShiftTab, Tab, ToggleFind, Undo, Up,
 };
 use gpui::*;
 use log::*;
@@ -34,6 +34,10 @@ fn main() {
             KeyBinding::new("ctrl-v", Paste, Some("CodeEditor")),
             KeyBinding::new("ctrl-z", Undo, Some("CodeEditor")),
             KeyBinding::new("ctrl-shift-z", Redo, Some("CodeEditor")),
+            KeyBinding::new("ctrl-f", ToggleFind, Some("CodeEditor")),
+            KeyBinding::new("escape", CancelFind, Some("CodeEditor")),
+            KeyBinding::new("f3", FindNext, Some("CodeEditor")),
+            KeyBinding::new("shift-f3", FindPrev, Some("CodeEditor")),
         ]);
 
         let bounds = Bounds::centered(None, size(px(1200.0), px(700.0)), context);

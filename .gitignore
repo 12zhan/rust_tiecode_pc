@@ -1,2 +1,45 @@
 /target
-/Cargo.lock
+
+# Cargo.lock is recommended to be committed for applications to ensure reproducible builds.
+# If you prefer to ignore it, uncomment the following line:
+# /Cargo.lock
+
+# CMake / C++ build artifacts
+/build/
+/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+*.cmake
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.pdb
+*.obj
+*.lib
+*.dll
+*.exe
+*.exp
+*.ilk
+
+# IDE settings
+.idea/
+.vscode/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+
+# Archives
+*.zip
+*.tar.gz
+
+# OS generated
+Thumbs.db
+.DS_Store
+
+# Specific generated files in root
+tiec.dll
+tiec.zip
+myeasylog.log

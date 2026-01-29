@@ -1,0 +1,183 @@
+cmake_minimum_required(VERSION 3.10)
+project(sweetline)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# compiler special
+if (MSVC)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zc:__cplusplus /utf-8")
+endif ()
+
+# options
+option(BUILD_TESTING "Includes testing source for unit tests" ON)
+option(STATIC_LIB "Build static library" ON)
+option(SHARED_LIB "Build dynamic library" ON)
+add_definitions(-DTESTS_DIR="${CMAKE_SOURCE_DIR}/tests")
+add_definitions(-DSYNTAX_DIR="${CMAKE_SOURCE_DIR}/syntaxes")
+add_definitions(-DSWEETLINE_EXPORT=1)
+add_definitions(-DSWEETLINE_DEBUG=1)
+
+# initial config
+set(LINK_LIB)
+set(CMAKE_PROJECT_DIR ${CMAKE_SOURCE_DIR})
+set(SRC_DIR ${CMAKE_PROJECT_DIR}/src)
+set(3DPARTY_DIR ${CMAKE_PROJECT_DIR}/3dparty)
+set(STATIC_LIB_NAME "${CMAKE_PROJECT_NAME}_static")
+set(SHARED_LIB_NAME "${CMAKE_PROJECT_NAME}")
+
+# header search path
+list(APPEND INCLUDE_DIRS
+        ${SRC_DIR}/include
+        ${SRC_DIR}/core
+        ${3DPARTY_DIR}/include
+)
+include_directories(${INCLUDE_DIRS})
+
+# core source files
+file(GLOB_RECURSE CORE_SOURCE_FILES ${SRC_DIR}/core/*.*)
+file(GLOB C_FILES ${SRC_DIR}/shared/*.cpp)
+
+# platform special
+set(PLATFORM_FILES)
+if (ANDROID)
+    file(GLOB_RECURSE PLATFORM_FILES ${CMAKE_PROJECT_DIR}/platform/Android/sweetline/src/main/cpp/*.*)
+    add_definitions(-DANDROID)
+    unset(STATIC_LIB)
+elseif (OHOS)
+    file(GLOB_RECURSE PLATFORM_FILES ${CMAKE_PROJECT_DIR}/platform/OHOS/sweetline/src/main/cpp/*.*)
+    add_definitions(-DOHOS)
+    unset(STATIC_LIB)
+elseif (WIN32)
+    add_definitions(-DWINDOWS -D_POSIX -D_POSIX_THREAD_SAFE_FUNCTIONS)
+elseif (EMSCRIPTEN)
+    add_definitions(-DWASM)
+    set(SHARED_LIB OFF)
+    file(GLOB_RECURSE WASM_FILES ${CMAKE_PROJECT_DIR}/platform/Emscripten/*.cpp)
+    message(STATUS "add target: libsweetline for wasm")
+    add_executable("libsweetline" ${WASM_FILES})
+    target_link_libraries("libsweetline" PRIVATE ${STATIC_LIB_NAME}
+            "--bind"
+            "-s WASM=1"
+            "-s MODULARIZE=1"
+            "-s EXPORT_NAME='libsweetline'"
+            "-s EXPORT_ES6=1"
+            "-s FORCE_FILESYSTEM=1"
+            "-s ALLOW_MEMORY_GROWTH=1"
+            "-s EXPORTED_RUNTIME_METHODS=[\"FS\"]"
+    )
+endif ()
+
+# project shared/dynamic lib
+if (STATIC_LIB)
+    add_definitions(-DONIG_STATIC=ON)
+    add_definitions(-DSWEETLINE_STATIC=1)
+    message(STATUS "add target: ${STATIC_LIB_NAME} as static lib")
+    add_library(${STATIC_LIB_NAME} STATIC ${CORE_SOURCE_FILES} ${PLATFORM_FILES} ${C_FILES})
+endif ()
+if (SHARED_LIB)
+    message(STATUS "add target: ${SHARED_LIB_NAME} as dynamic lib")
+    add_library(${SHARED_LIB_NAME} SHARED ${CORE_SOURCE_FILES} ${PLATFORM_FILES} ${C_FILES})
+endif ()
+
+# add library functions
+function(add_platform_library dir filename type)
+    if (${type} STREQUAL "STATIC")
+        add_library(${dir} STATIC IMPORTED)
+    elseif (${type} STREQUAL "SHARED")
+        add_library(${dir} SHARED IMPORTED)
+    else ()
+        message(FATAL_ERROR "Error: add_platform_library type must be STATIC/SHARED")
+    endif ()
+    set(LIB_PATH)
+    if (ANDROID)
+        set(LIB_PATH ${3DPARTY_DIR}/lib/${dir}/android/${CMAKE_ANDROID_ARCH_ABI}/${filename})
+    elseif (OHOS)
+        set(LIB_PATH ${3DPARTY_DIR}/lib/${dir}/ohos/${OHOS_ARCH}/${filename})
+    elseif (WIN32)
+        if (MSVC)
+            if(CMAKE_BUILD_TYPE STREQUAL "Release")
+                set(LIB_PATH ${3DPARTY_DIR}/lib/${dir}/windows/msvc/release/${filename})
+            else ()
+                set(LIB_PATH ${3DPARTY_DIR}/lib/${dir}/windows/msvc/debug/${filename})
+            endif ()
+        else ()
+            set(LIB_PATH ${3DPARTY_DIR}/lib/${dir}/windows/mingw64/${filename})
+        endif ()
+    elseif (EMSCRIPTEN)
+        set(LIB_PATH ${3DPARTY_DIR}/lib/${dir}/emscripten/${filename})
+    endif ()
+    message(STATUS "Add platform library: ${LIB_PATH}")
+    set_target_properties(${dir} PROPERTIES IMPORTED_LOCATION ${LIB_PATH})
+    set(LINK_LIB ${LINK_LIB} ${dir} PARENT_SCOPE)
+endfunction()
+
+# add library
+if (ANDROID)
+    add_platform_library(oniguruma libonig.a STATIC)
+    find_library(ANDROID_LIB android)
+    find_library(LOG_LIB log)
+    set(LINK_LIB ${LINK_LIB} ${ANDROID_LIB} ${LOG_LIB})
+elseif (OHOS)
+    add_platform_library(oniguruma libonig.a STATIC)
+    set(LINK_LIB ${LINK_LIB} libace_napi.z.so libhilog_ndk.z.so)
+elseif (WIN32)
+    if (MSVC)
+        add_platform_library(oniguruma onig.lib STATIC)
+    else ()
+        add_platform_library(oniguruma libonig.a STATIC)
+    endif ()
+    set(LINK_LIB ${LINK_LIB} ws2_32)
+elseif (APPLE)
+    # macOS
+    find_library(ONIG_LIBRARY NAMES onig libonig.a REQUIRED)
+    message(STATUS "Found oniguruma: ${ONIG_LIBRARY}")
+    add_library(oniguruma STATIC IMPORTED)
+    set_target_properties(oniguruma PROPERTIES IMPORTED_LOCATION ${ONIG_LIBRARY})
+    set(LINK_LIB ${LINK_LIB} oniguruma)
+elseif (UNIX AND NOT ANDROID AND NOT EMSCRIPTEN AND NOT OHOS)
+    # Linux
+    find_library(ONIG_LIBRARY NAMES onig libonig.a REQUIRED)
+    message(STATUS "Found oniguruma: ${ONIG_LIBRARY}")
+    add_library(oniguruma STATIC IMPORTED)
+    set_target_properties(oniguruma PROPERTIES IMPORTED_LOCATION ${ONIG_LIBRARY})
+    set(LINK_LIB ${LINK_LIB} oniguruma)
+elseif (EMSCRIPTEN)
+    add_platform_library(oniguruma libonig.a STATIC)
+endif ()
+
+# merge static libs
+if (STATIC_LIB)
+    target_link_libraries(${STATIC_LIB_NAME} PRIVATE ${LINK_LIB})
+    
+    # Only merge oniguruma if it's available as a target and we are on a supported platform for merging
+    if (TARGET oniguruma AND NOT APPLE)
+        include(cmake/MergeStaticLib.cmake)
+        get_target_property(ONIG_PATH oniguruma IMPORTED_LOCATION)
+        if (ONIG_PATH)
+            message(STATUS "Merging oniguruma from: ${ONIG_PATH}")
+            merge_static_libs(${STATIC_LIB_NAME} ${ONIG_PATH})
+        endif()
+    endif()
+endif ()
+if (SHARED_LIB)
+    target_link_libraries(${SHARED_LIB_NAME} PRIVATE ${LINK_LIB})
+endif ()
+
+# Unit tests
+if (BUILD_TESTING)
+    message(STATUS "Unit tests enabled")
+    if (NOT ANDROID AND NOT OHOS AND NOT EMSCRIPTEN)
+        add_subdirectory(${CMAKE_PROJECT_DIR}/tests)
+    endif ()
+endif()
+
+# Installation
+if (STATIC_LIB)
+    install(TARGETS ${STATIC_LIB_NAME} ARCHIVE DESTINATION lib)
+endif ()
+if (SHARED_LIB)
+    install(TARGETS ${SHARED_LIB_NAME} LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
+endif ()

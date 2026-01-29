@@ -1,0 +1,240 @@
+#ifndef SWEETLINE_HIGHLIGHT_H
+#define SWEETLINE_HIGHLIGHT_H
+
+#include <cstdint>
+#include "foundation.h"
+#include "syntax.h"
+
+namespace NS_SWEETLINE {
+  /// 匹配的每一个高亮块
+  struct TokenSpan {
+    /// 高亮块的范围
+    TextRange range;
+    /// 匹配到的文本
+    U8String matched_text;
+    /// 高亮块所匹配的高亮样式ID
+    int32_t style_id;
+    /// 高亮块样式详细信息，inline_style 模式下才有该字段
+    InlineStyle inline_style;
+    /// 高亮块被匹配时所处的状态
+    int32_t state {0};
+    /// 高亮块要跳转的别的state
+    int32_t goto_state {-1};
+
+    bool operator==(const TokenSpan& other) const;
+    bool operator!=(const TokenSpan& other) const;
+
+#ifdef SWEETLINE_DEBUG
+    void dump() const;
+#endif
+  };
+
+  /// 每一行的高亮块序列
+  struct LineHighlight {
+    List<TokenSpan> spans;
+    void pushOrMergeSpan(TokenSpan&& span);
+    bool operator==(const LineHighlight& other) const;
+    void toJson(U8String& result) const;
+
+#ifdef SWEETLINE_DEBUG
+    void dump() const;
+#endif
+  };
+
+  /// 整个文本内容的高亮
+  struct DocumentHighlight {
+    List<LineHighlight> lines;
+
+    void addLine(LineHighlight&& line);
+    size_t spanCount() const;
+    void reset();
+    void toJson(U8String& result) const;
+
+#ifdef SWEETLINE_DEBUG
+    void dump() const;
+#endif
+  };
+
+  /// 作用域划线区域
+  struct CodeBlock {
+    /// 划线起始位置
+    TextPosition start;
+    /// 划线结束位置
+    TextPosition end;
+    /// 划线树形分支位置
+    List<TextPosition> branches;
+
+#ifdef SWEETLINE_DEBUG
+    void dump() const;
+#endif
+  };
+
+  /// 代码块作用域状态
+  enum struct BlockState : int8_t {
+    /// 作用域划线开始
+    START = 0,
+    /// 作用域划线结束
+    END,
+    /// 作用域中间内容
+    CONTENT
+  };
+
+  /// 行作用域划线分析状态
+  struct LineBlockState {
+    /// 行所处嵌套层级
+    int32_t nesting_level {-1};
+    /// 行所处作用域划线状态
+    BlockState block_state {BlockState::CONTENT};
+    /// 代码块划线所处列 (仅当 block_state 为 START 或 END 时有该项)
+    int32_t block_column {0};
+
+    bool operator==(const LineBlockState& other) const;
+  };
+
+  /// 文本行元数据信息
+  struct TextLineInfo {
+    /// 行号索引
+    size_t line {0};
+    /// 行起始高亮状态
+    int32_t start_state {SyntaxRule::kDefaultStateId};
+    /// 行在整个文本中起始字符偏移 (不是字节)，用于计算高亮块(TokenSpan) index，HighlightConfig中未开启 show_index 时 无需该字段
+    size_t start_char_offset {0};
+  };
+
+  /// 单行语法高亮分析结果
+  struct LineAnalyzeResult {
+    /// 当前行高亮序列
+    LineHighlight highlight;
+    /// 行分析完毕后结束状态
+    int32_t end_state {SyntaxRule::kDefaultStateId};
+    /// 当前行总计分析的字符总数 (不是字节)，不包含换行符
+    size_t char_count {0};
+  };
+
+  /// 高亮配置
+  struct HighlightConfig {
+    /// 分析的高亮信息是否携带index，不携带的情况下每个TokenSpan只有line和column
+    bool show_index {false};
+    /// 是否支持内联样式，即不需要外部注册高亮样式，直接在语法规则json中定义高亮样式，高亮分析结果中直接包含高亮样式(前景色、加粗等），而不是返回样式ID
+    bool inline_style {false};
+
+    static HighlightConfig kDefault;
+  };
+
+  class LineHighlightAnalyzer;
+  /// 纯文本高亮分析器，不支持增量更新，适用于全量分析的场景
+  class TextAnalyzer {
+  public:
+    TextAnalyzer(const SharedPtr<SyntaxRule>& rule, const HighlightConfig& config = HighlightConfig::kDefault);
+
+    /// 分析一段文本内容，并返回整段文本的高亮结果
+    /// @param text 整段文本内容
+    /// @return 高亮结果
+    SharedPtr<DocumentHighlight> analyzeText(const U8String& text);
+
+    /// 分析单行文本
+    /// @param text 单行文本内容
+    /// @param line_info 当前行元数据信息
+    /// @param result 用于接收单行高亮分析结果
+    void analyzeLine(const U8String& text, const TextLineInfo& line_info, LineAnalyzeResult& result) const;
+
+    /// 获取当前高亮配置
+    const HighlightConfig& getHighlightConfig() const;
+  private:
+    UniquePtr<LineHighlightAnalyzer> m_line_highlight_analyzer_;
+  };
+
+  class InternalDocumentAnalyzer;
+  /// 托管文档高亮分析器，支持自动patch文本进行增量分析
+  class DocumentAnalyzer {
+  public:
+    /// 对整个托管文档进行高亮分析
+    /// @return 整个托管文档的高亮结果
+    SharedPtr<DocumentHighlight> analyze() const;
+
+    /// 根据patch内容重新分析整个托管文档的高亮结果
+    /// @param range patch的变更范围
+    /// @param new_text patch的文本
+    /// @return 整个托管文档的高亮结果
+    SharedPtr<DocumentHighlight> analyzeIncremental(const TextRange& range, const U8String& new_text) const;
+
+    /// 根据patch内容重新分析整个托管文档的高亮结果
+    /// @param start_index patch变更的起始字符索引
+    /// @param end_index patch变更的结束字符索引
+    /// @param new_text patch的文本
+    /// @return 整个托管文档的高亮结果
+    SharedPtr<DocumentHighlight> analyzeIncremental(size_t start_index, size_t end_index, const U8String& new_text) const;
+
+    /// 获取当前高亮分析器持有的托管文档
+    /// @return std::shared_ptr<Document>
+    SharedPtr<Document> getDocument() const;
+
+    /// 获取当前的高亮配置
+    /// @return HighlightConfig
+    const HighlightConfig& getHighlightConfig() const;
+  private:
+    friend class HighlightEngine;
+    DocumentAnalyzer(const SharedPtr<Document>& document, const SharedPtr<SyntaxRule>& rule,
+      const HighlightConfig& config = HighlightConfig::kDefault);
+    UniquePtr<InternalDocumentAnalyzer> analyzer_impl_;
+  };
+
+  /// 高亮引擎
+  class HighlightEngine {
+  public:
+    explicit HighlightEngine(const HighlightConfig& config = HighlightConfig::kDefault);
+
+    /// 通过json编译语法规则
+    /// @param json 语法规则文件的json
+    /// @throws SyntaxRuleParseError 编译错误时会抛出 SyntaxRuleParseError
+    SharedPtr<SyntaxRule> compileSyntaxFromJson(const U8String& json);
+
+    /// 编译语法规则
+    /// @param file 语法规则定义文件(json)
+    /// @throws SyntaxRuleParseError 编译错误时会抛出 SyntaxRuleParseError
+    SharedPtr<SyntaxRule> compileSyntaxFromFile(const U8String& file);
+
+    /// 获取指定名称的语法规则(如 java)
+    /// @param name 语法规则名称
+    SharedPtr<SyntaxRule> getSyntaxRuleByName(const U8String& name) const;
+
+    /// 获取指定后缀名匹配的的语法规则(如 .t)
+    /// @param extension 后缀名
+    SharedPtr<SyntaxRule> getSyntaxRuleByExtension(const U8String& extension) const;
+
+    /// 注册一个高亮样式，用于名称映射
+    /// @param style_name 样式名称
+    /// @param style_id 样式id
+    void registerStyleName(const U8String& style_name, int32_t style_id) const;
+
+    /// 通过样式id获取注册的样式名称
+    /// @param style_id 样式id
+    const U8String& getStyleName(int32_t style_id) const;
+
+    /// 根据语法规则名称创建一个文本高亮分析器(不支持增量分析,但可以分析单行并获得行状态,可以在上层自行实现增量分析)
+    /// @param syntax_name 语法规则名称(如 java)
+    /// @return TextAnalyzer
+    SharedPtr<TextAnalyzer> createAnalyzerByName(const U8String& syntax_name) const;
+
+    /// 根据文件后缀名创建一个文本高亮分析器(不支持增量分析,但可以分析单行并获得行状态,可以在上层自行实现增量分析)
+    /// @param extension 文件后缀名(如 .t)
+    /// @return TextAnalyzer
+    SharedPtr<TextAnalyzer> createAnalyzerByExtension(const U8String& extension) const;
+
+    /// 加载托管文档并获得支持增量分析的高亮分析器
+    /// @param document 托管文档
+    /// @return 整个托管文档的高亮结果
+    SharedPtr<DocumentAnalyzer> loadDocument(const SharedPtr<Document>& document);
+
+    /// 移除加载过的托管文档
+    /// @param uri 托管文档的Uri
+    void removeDocument(const U8String& uri);
+  private:
+    HighlightConfig m_config_;
+    HashSet<SharedPtr<SyntaxRule>> m_syntax_rules_;
+    HashMap<U8String, SharedPtr<DocumentAnalyzer>> m_analyzer_map_;
+    SharedPtr<StyleMapping> m_style_mapping_;
+  };
+}
+
+#endif //SWEETLINE_HIGHLIGHT_H

@@ -1,7 +1,6 @@
 use gpui::*;
 use lru::LruCache;
 use ropey::Rope;
-use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::ops::Range;
@@ -20,7 +19,6 @@ use crate::editor::grammar::JIESHENG_GRAMMAR;
 
 use self::completion::{CompletionItem, CompletionKind, CPP_KEYWORDS};
 use self::core::{EditorCore, Selection};
-use self::grammar::CPP_GRAMMAR;
 use self::layout::EditorLayout;
 use tiecode::sweetline::{Document, DocumentAnalyzer, Engine, HighlightSpan};
 
@@ -66,15 +64,16 @@ pub struct CodeEditor {
 }
 
 impl CodeEditor {
+    const DEFAULT_DOC_URI: &'static str = "untitled.t";
+
     pub fn new(cx: &mut Context<Self>) -> Self {
         let engine = Arc::new(Engine::new(true));
-        // Compile embedded 结绳 grammar
         engine
             .compile_json(JIESHENG_GRAMMAR)
             .expect("Failed to compile 结绳 grammar");
 
         // Initialize empty document
-        let doc = Document::new("untitled.cpp", "");
+        let doc = Document::new(Self::DEFAULT_DOC_URI, "");
         let analyzer = engine.load_document(&doc);
 
         Self {
@@ -256,6 +255,8 @@ impl CodeEditor {
             }
 
             self.core.replace_range(word_start..cursor, &label);
+            self.sync_sweetline_document();
+            self.update_completion(cx);
 
             self.core.completion_active = false;
             self.core.completion_items.clear();
@@ -278,6 +279,7 @@ impl CodeEditor {
             }
         }
         self.core.delete_selection();
+        self.sync_sweetline_document();
         self.update_completion(cx);
         cx.notify();
     }
@@ -367,11 +369,15 @@ impl CodeEditor {
 
     fn undo(&mut self, _: &Undo, _window: &mut Window, cx: &mut Context<Self>) {
         self.core.undo();
+        self.sync_sweetline_document();
+        self.update_completion(cx);
         cx.notify();
     }
 
     fn redo(&mut self, _: &Redo, _window: &mut Window, cx: &mut Context<Self>) {
         self.core.redo();
+        self.sync_sweetline_document();
+        self.update_completion(cx);
         cx.notify();
     }
 
@@ -626,7 +632,7 @@ impl CodeEditor {
             }
         }
 
-        let highlights = self.get_highlights_for_line(line_index, line_start_byte, text.len());
+        let highlights = self.get_highlights_for_line(line_start_byte, text);
         let line = Self::shape_code_line(window, text, font_size, &highlights);
 
         if let Ok(mut cache) = self.render_cache.lock() {
@@ -638,10 +644,11 @@ impl CodeEditor {
     fn sync_sweetline_document(&mut self) {
         let text = self.core.content.to_string();
 
+        let _ = self.sweetline_engine.remove_document(Self::DEFAULT_DOC_URI);
         self.sweetline_analyzer = None;
         self.sweetline_document = None;
 
-        let doc = Document::new("untitled.cpp", &text);
+        let doc = Document::new(Self::DEFAULT_DOC_URI, &text);
         let analyzer = self.sweetline_engine.load_document(&doc);
 
         self.sweetline_document = Some(doc);
@@ -676,34 +683,51 @@ impl CodeEditor {
 
     fn get_highlights_for_line(
         &self,
-        _line_index: usize,
         line_start_byte: usize,
-        line_len: usize,
+        line_text: &str,
     ) -> Vec<(Range<usize>, Hsla)> {
         let mut result = Vec::new();
-        let line_end_byte = line_start_byte + line_len;
+        let line_start_char = self.core.content.byte_to_char(line_start_byte);
+        let line_char_len = line_text.chars().count();
+        let line_end_char = line_start_char + line_char_len;
 
         for span in &self.cached_highlights {
-            let span_start = span.start_index as usize;
-            let span_end = span.end_index as usize;
+            let span_start_char = span.start_index as usize;
+            let span_end_char = span.end_index as usize;
 
             // Check intersection
-            if span_end > line_start_byte && span_start < line_end_byte {
-                let start = span_start.max(line_start_byte) - line_start_byte;
-                let end = span_end.min(line_end_byte) - line_start_byte;
+            if span_end_char > line_start_char && span_start_char < line_end_char {
+                let start_in_line_chars = span_start_char.max(line_start_char) - line_start_char;
+                let end_in_line_chars = span_end_char.min(line_end_char) - line_start_char;
 
-                if start < end {
-                    if let Some(color) = self.style_cache.get(&span.style_id) {
-                        result.push((start..end, *color));
+                if start_in_line_chars < end_in_line_chars {
+                    let start_byte =
+                        Self::byte_offset_for_char_offset(line_text, start_in_line_chars);
+                    let end_byte = Self::byte_offset_for_char_offset(line_text, end_in_line_chars);
+                    if start_byte < end_byte {
+                        if let Some(color) = self.style_cache.get(&span.style_id) {
+                            result.push((start_byte..end_byte, *color));
+                        }
                     }
                 }
             }
         }
 
-        // Ensure highlights are sorted by start index for shape_code_line
         result.sort_by(|a, b| a.0.start.cmp(&b.0.start));
-
         result
+    }
+
+    fn byte_offset_for_char_offset(text: &str, char_offset: usize) -> usize {
+        if char_offset == 0 {
+            return 0;
+        }
+        if char_offset >= text.chars().count() {
+            return text.len();
+        }
+        text.char_indices()
+            .nth(char_offset)
+            .map(|(byte_idx, _)| byte_idx)
+            .unwrap_or(text.len())
     }
 
     fn color_for_style(&self, style: &str) -> Option<Hsla> {
@@ -712,6 +736,11 @@ impl CodeEditor {
             "string" => Some(rgb(0xce9178).into()),
             "comment" => Some(rgb(0x6a9955).into()),
             "number" => Some(rgb(0xb5cea8).into()),
+            "class" => Some(rgb(0x4ec9b0).into()),
+            "method" => Some(rgb(0x9cdcfe).into()),
+            "variable" => Some(rgb(0x9b9bc8).into()),
+            "punctuation" => Some(rgb(0xd69d85).into()),
+            "annotation" => Some(rgb(0xfffd9b).into()),
             "type" => Some(rgb(0x4ec9b0).into()),
             "preprocessor" => Some(rgb(0xc586c0).into()),
             "function" => Some(rgb(0xdcdcaa).into()),

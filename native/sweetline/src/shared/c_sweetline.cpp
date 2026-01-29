@@ -161,6 +161,21 @@ extern "C"
     return toIntPtr(analyzer);
   }
 
+  sl_error_t sl_engine_remove_document(intptr_t engine_handle, const char *uri)
+  {
+    SharedPtr<HighlightEngine> engine = getCPtrHolderValue<HighlightEngine>(engine_handle);
+    if (engine == nullptr)
+    {
+      return SL_HANDLE_INVALID;
+    }
+    if (uri == nullptr)
+    {
+      return SL_JSON_PROPERTY_INVALID;
+    }
+    engine->removeDocument(uri);
+    return SL_OK;
+  }
+
   int32_t *sl_document_analyze(intptr_t analyzer_handle, int32_t *data_size)
   {
     SharedPtr<DocumentAnalyzer> analyzer = getCPtrHolderValue<DocumentAnalyzer>(analyzer_handle);

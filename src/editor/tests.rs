@@ -1,10 +1,9 @@
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::editor::grammar::CPP_GRAMMAR;
+    use crate::editor::CodeEditor;
     use tiecode::sweetline::{Engine, Document, DocumentAnalyzer};
-    use std::collections::HashMap;
 
     #[test]
     fn test_cpp_highlighting() {
@@ -42,6 +41,62 @@ mod tests {
     
     assert!(!raw_result.is_empty(), "Analyze returned empty result");
 }
+
+    #[test]
+    fn test_engine_remove_document_allows_reloading_same_uri() {
+        let engine = Engine::new(true);
+        engine.compile_json(CPP_GRAMMAR).unwrap();
+
+        let code_v1 = "int a = 1;";
+        let doc_v1 = Document::new("same.cpp", code_v1);
+        let analyzer_v1 = engine.load_document(&doc_v1);
+        let spans_v1 = DocumentAnalyzer::parse_result(&analyzer_v1.analyze(), false);
+        assert!(
+            spans_v1
+                .iter()
+                .any(|s| engine.get_style_name(s.style_id).as_deref() == Some("keyword")),
+            "Expected keyword highlight in v1"
+        );
+
+        engine.remove_document("same.cpp").unwrap();
+
+        let code_v2 = "return 0;";
+        let doc_v2 = Document::new("same.cpp", code_v2);
+        let analyzer_v2 = engine.load_document(&doc_v2);
+        let spans_v2 = DocumentAnalyzer::parse_result(&analyzer_v2.analyze(), false);
+
+        let mut saw_return_keyword = false;
+        for span in spans_v2 {
+            let name = engine.get_style_name(span.style_id).unwrap_or_default();
+            let token = &code_v2[span.start_index as usize..span.end_index as usize];
+            if token == "return" && name == "keyword" {
+                saw_return_keyword = true;
+                break;
+            }
+        }
+        assert!(saw_return_keyword, "Expected 'return' to be keyword in v2");
+    }
+
+    #[test]
+    fn test_byte_offset_for_char_offset_is_utf8_boundary() {
+        let text = "类 启动类";
+        let offsets = [
+            CodeEditor::byte_offset_for_char_offset(text, 0),
+            CodeEditor::byte_offset_for_char_offset(text, 1),
+            CodeEditor::byte_offset_for_char_offset(text, 2),
+            CodeEditor::byte_offset_for_char_offset(text, 3),
+        ];
+        for off in offsets {
+            assert!(
+                text.is_char_boundary(off),
+                "offset {} must be char boundary for '{}'",
+                off,
+                text
+            );
+        }
+        assert_eq!(CodeEditor::byte_offset_for_char_offset(text, 1), 3);
+        assert_eq!(CodeEditor::byte_offset_for_char_offset(text, 2), 4);
+    }
 
     #[test]
     fn test_core_replace_range() {

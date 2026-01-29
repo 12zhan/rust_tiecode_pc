@@ -71,6 +71,18 @@ impl Engine {
         }
     }
 
+    pub fn remove_document(&self, uri: &str) -> Result<(), SweetLineError> {
+        let c_uri = CString::new(uri).map_err(|_| SweetLineError::JsonInvalid)?;
+        unsafe {
+            let err = sl_engine_remove_document(self.handle, c_uri.as_ptr());
+            if err == sl_error_SL_OK {
+                Ok(())
+            } else {
+                Err(SweetLineError::from(err))
+            }
+        }
+    }
+
     pub fn get_style_name(&self, style_id: u32) -> Option<String> {
         unsafe {
             let ptr = sl_engine_get_style_name(self.handle, style_id as i32);

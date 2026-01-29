@@ -136,6 +136,12 @@ extern "C"
   /// @return 文档高亮分析器句柄
   SL_API intptr_t sl_engine_load_document(intptr_t engine_handle, intptr_t document_handle);
 
+  /// 从引擎缓存中移除指定 uri 的文档分析器
+  /// @param engine_handle 高亮引擎句柄
+  /// @param uri 文档 uri
+  /// @return 返回错误码，移除成功时返回 @see {SL_OK}
+  SL_API sl_error_t sl_engine_remove_document(intptr_t engine_handle, const char *uri);
+
   /// 对托管文档进行全量高亮分析(一般首次加载文档后调用一次)
   /// @param analyzer_handle 文档高亮分析器句柄
   /// @param data_size 分析结果数组的大小，分析完毕后设置给该参数

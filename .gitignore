@@ -43,3 +43,6 @@ Thumbs.db
 tiec.dll
 tiec.zip
 myeasylog.log
+
+# Exceptions
+!native/sweetline/cmake/MergeStaticLib.cmake

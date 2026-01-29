@@ -7,6 +7,7 @@ build = "build.rs"
 [dependencies]
 # gpui构建图形化程序
 gpui={version="0.2.2"}
+core-text = "=21.0.0"
 # 日志库，用于调试
 log = "0.4"
 # 简单的日志实现器，将日志输出到控制台

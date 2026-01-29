@@ -137,6 +137,11 @@ elseif (APPLE)
     add_library(oniguruma STATIC IMPORTED)
     set_target_properties(oniguruma PROPERTIES IMPORTED_LOCATION ${ONIG_LIBRARY})
     set(LINK_LIB ${LINK_LIB} oniguruma)
+    
+    # iconv
+    find_library(ICONV_LIBRARY iconv REQUIRED)
+    message(STATUS "Found iconv: ${ICONV_LIBRARY}")
+    set(LINK_LIB ${LINK_LIB} ${ICONV_LIBRARY})
 elseif (UNIX AND NOT ANDROID AND NOT EMSCRIPTEN AND NOT OHOS)
     # Linux
     find_library(ONIG_LIBRARY NAMES onig libonig.a REQUIRED)

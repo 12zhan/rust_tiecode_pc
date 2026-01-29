@@ -30,7 +30,22 @@ fn main() {
     #[cfg(target_os = "linux")]
     println!("cargo:rustc-link-lib=dylib=stdc++");
     #[cfg(target_os = "macos")]
-    println!("cargo:rustc-link-lib=dylib=c++");
+    {
+        println!("cargo:rustc-link-lib=dylib=c++");
+        println!("cargo:rustc-link-lib=dylib=iconv");
+        println!("cargo:rustc-link-lib=dylib=onig");
+        
+        // 尝试通过 pkg-config 查找 oniguruma 路径 (解决 macOS 上 brew 安装路径问题)
+        use std::process::Command;
+        if let Ok(output) = Command::new("pkg-config").args(&["--libs-only-L", "oniguruma"]).output() {
+            let s = String::from_utf8_lossy(&output.stdout);
+            for part in s.split_whitespace() {
+                if let Some(path) = part.strip_prefix("-L") {
+                    println!("cargo:rustc-link-search=native={}", path);
+                }
+            }
+        }
+    }
 
     // 4. 生成 Rust 绑定
     let bindings = bindgen::Builder::default()

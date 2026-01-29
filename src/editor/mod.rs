@@ -714,7 +714,22 @@ impl CodeEditor {
         }
 
         result.sort_by(|a, b| a.0.start.cmp(&b.0.start));
-        result
+
+        let mut normalized = Vec::with_capacity(result.len());
+        let mut last_end = 0usize;
+        let line_len = line_text.len();
+        for (range, color) in result {
+            let mut start = range.start.min(line_len);
+            let end = range.end.min(line_len);
+            if start < last_end {
+                start = last_end;
+            }
+            if start < end {
+                normalized.push((start..end, color));
+                last_end = end;
+            }
+        }
+        normalized
     }
 
     fn byte_offset_for_char_offset(text: &str, char_offset: usize) -> usize {
@@ -728,6 +743,18 @@ impl CodeEditor {
             .nth(char_offset)
             .map(|(byte_idx, _)| byte_idx)
             .unwrap_or(text.len())
+    }
+
+    fn clamp_to_char_boundary(text: &str, idx: usize) -> usize {
+        let idx = idx.min(text.len());
+        if text.is_char_boundary(idx) {
+            return idx;
+        }
+        text.char_indices()
+            .map(|(byte_idx, _)| byte_idx)
+            .take_while(|&byte_idx| byte_idx < idx)
+            .last()
+            .unwrap_or(0)
     }
 
     fn color_for_style(&self, style: &str) -> Option<Hsla> {
@@ -1032,7 +1059,13 @@ impl EntityInputHandler for CodeEditor {
         let y = self.layout.line_y(bounds, line_index);
 
         let line_slice = content.line(line_index);
-        let line_text = line_slice.to_string();
+        let mut line_text = line_slice.to_string();
+        if line_text.ends_with('\n') {
+            line_text.pop();
+            if line_text.ends_with('\r') {
+                line_text.pop();
+            }
+        }
 
         let line = self.get_cached_shape_line(
             window,
@@ -1069,7 +1102,13 @@ impl EntityInputHandler for CodeEditor {
 
         let line_start = content.line_to_byte(line_index);
         let line_slice = content.line(line_index);
-        let line_text = line_slice.to_string();
+        let mut line_text = line_slice.to_string();
+        if line_text.ends_with('\n') {
+            line_text.pop();
+            if line_text.ends_with('\r') {
+                line_text.pop();
+            }
+        }
 
         let line = self.get_cached_shape_line(
             window,
@@ -1079,7 +1118,10 @@ impl EntityInputHandler for CodeEditor {
             line_start,
         );
         let local_x = point.x - text_x;
-        let utf8_index = line.index_for_x(local_x).unwrap_or(line_text.len());
+        let utf8_index = Self::clamp_to_char_boundary(
+            &line_text,
+            line.index_for_x(local_x).unwrap_or(line_text.len()),
+        );
         Some(self.offset_to_utf16(line_start + utf8_index))
     }
 }
@@ -1119,7 +1161,10 @@ impl CodeEditor {
             line_start,
         );
         let local_x = point.x - text_x;
-        let utf8_index = line.index_for_x(local_x).unwrap_or(line_text.len());
+        let utf8_index = Self::clamp_to_char_boundary(
+            line_text,
+            line.index_for_x(local_x).unwrap_or(line_text.len()),
+        );
         let index = line_start + utf8_index;
         if index > content.len_bytes() {
             Some(content.len_bytes())
@@ -1394,8 +1439,14 @@ pub fn code_editor_canvas(
                                         let end_in_line = sel_end - line_start;
                                         let line_len = line_text.len();
 
-                                        let shape_start = start_in_line.min(line_len);
-                                        let shape_end = end_in_line.min(line_len);
+                                        let shape_start = CodeEditor::clamp_to_char_boundary(
+                                            line_text,
+                                            start_in_line.min(line_len),
+                                        );
+                                        let shape_end = CodeEditor::clamp_to_char_boundary(
+                                            line_text,
+                                            end_in_line.min(line_len),
+                                        );
 
                                         let text_line_shape =
                                             editor.read(cx).get_cached_shape_line(

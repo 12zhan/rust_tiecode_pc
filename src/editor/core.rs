@@ -198,6 +198,7 @@ impl EditorCore {
          // Let's just update the primary selection to match behavior.
          let new_pos = range.start + text.len();
          self.selections = vec![Selection::new(new_pos, new_pos)];
+         self.marked_range = None;
          
          self.history.end_transaction();
     }

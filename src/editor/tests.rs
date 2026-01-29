@@ -66,6 +66,11 @@ mod tests {
         // Test replace in middle
         core.replace_range(1..3, "oo");
         assert_eq!(core.content.to_string(), "toot");
+
+        // Test replace clears marked_range
+        core.marked_range = Some(0..4);
+        core.replace_range(4..4, "s");
+        assert!(core.marked_range.is_none(), "marked_range should be cleared after replace_range");
     }
 
 }

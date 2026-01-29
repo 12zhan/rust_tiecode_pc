@@ -936,6 +936,7 @@ impl EntityInputHandler for CodeEditor {
             .unwrap_or(self.core.primary_selection().range());
 
         self.core.replace_range(range, new_text);
+        // self.core.replace_range already clears marked_range
         self.sync_sweetline_document();
 
         self.update_completion(cx);

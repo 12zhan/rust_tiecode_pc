@@ -4,84 +4,94 @@
 #include "highlight.h"
 #include "internal_syntax.h"
 
-namespace NS_SWEETLINE {
-  struct CaptureGroupMatch {
+namespace NS_SWEETLINE
+{
+  struct CaptureGroupMatch
+  {
     /// 匹配到的捕获组索引
-    int32_t group {-1};
+    int32_t group{-1};
     /// 高亮样式
     int32_t style;
     /// 匹配到的起始字符位置
-    size_t start {0};
+    size_t start{0};
     /// 匹配到的字符长度
-    size_t length {0};
+    size_t length{0};
   };
 
   /// 正则匹配结果
-  struct MatchResult {
+  struct MatchResult
+  {
     /// 是否匹配到了
-    bool matched {false};
+    bool matched{false};
     /// 匹配到的起始字符位置
-    size_t start {0};
+    size_t start{0};
     /// 匹配到的字符长度
-    size_t length {0};
+    size_t length{0};
     /// 当前所处的state
-    int32_t state {-1};
+    int32_t state{-1};
     /// 匹配到的所属token rule
-    int32_t token_rule_idx {-1};
+    int32_t token_rule_idx{-1};
     /// 匹配到的捕获组
-    int32_t matched_group {-1};
+    int32_t matched_group{-1};
     /// 高亮样式
-    int32_t style {0};
+    int32_t style{0};
     /// 要切换的state
-    int32_t goto_state {-1};
+    int32_t goto_state{-1};
     /// 匹配到的文本内容
     U8String matched_text;
     /// 所有匹配的捕获组
     List<CaptureGroupMatch> capture_groups;
+    /// 子模式匹配结果 (Feature: Subpattern)
+    List<TokenSpan> sub_spans;
   };
 
   /// 单行文本语法分析
-  class LineHighlightAnalyzer {
+  class LineHighlightAnalyzer
+  {
   public:
-    LineHighlightAnalyzer(const SharedPtr<SyntaxRule>& syntax_rule,
-      const HighlightConfig& config = HighlightConfig::kDefault);
+    LineHighlightAnalyzer(const SharedPtr<SyntaxRule> &syntax_rule,
+                          const HighlightConfig &config = HighlightConfig::kDefault);
 
     /// 传入行号和对应行文本进行语法分析
     /// @param text 对应行文本
     /// @param info 行起始高亮状态信息、行号等元数据信息
     /// @param result 高亮结果，用于接收分析时结果
     /// @return 分析完毕后的一些信息，供后续使用
-    void analyzeLine(const U8String& text, const TextLineInfo& info, LineAnalyzeResult& result) const;
+    void analyzeLine(const U8String &text, const TextLineInfo &info, LineAnalyzeResult &result) const;
 
     /// 获取当前配置的高亮选项
-    const HighlightConfig& getHighlightConfig() const;
+    const HighlightConfig &getHighlightConfig() const;
+
   private:
     SharedPtr<SyntaxRule> m_rule_;
     HighlightConfig m_config_;
 
-    MatchResult matchAtPosition(const U8String& text, size_t start_char_pos, int32_t syntax_state) const;
+    MatchResult matchAtPosition(const U8String &text, size_t start_char_pos, int32_t syntax_state) const;
+    MatchResult matchAtPosition(const U8String &text, size_t start_char_pos, const StateRule &state_rule) const;
 
-    static void findMatchedRuleAndGroup(const StateRule& state_rule, const OnigRegion* region,
-      const U8String& text, size_t match_start_byte, size_t match_end_byte, MatchResult& result);
+    static void findMatchedRuleAndGroup(const StateRule &state_rule, const OnigRegion *region,
+                                        const U8String &text, size_t match_start_byte, size_t match_end_byte, MatchResult &result);
 
-    void addLineHighlightResult(LineHighlight& highlight, const TextLineInfo& info,
-      int32_t syntax_state, const MatchResult& match_result) const;
+    void addLineHighlightResult(LineHighlight &highlight, const TextLineInfo &info,
+                                int32_t syntax_state, const MatchResult &match_result) const;
   };
 
-  class InternalDocumentAnalyzer {
+  class InternalDocumentAnalyzer
+  {
   public:
-    explicit InternalDocumentAnalyzer(const SharedPtr<Document>& document, const SharedPtr<SyntaxRule>& rule,
-      const HighlightConfig& config = HighlightConfig::kDefault);
+    explicit InternalDocumentAnalyzer(const SharedPtr<Document> &document, const SharedPtr<SyntaxRule> &rule,
+                                      const HighlightConfig &config = HighlightConfig::kDefault);
 
     SharedPtr<DocumentHighlight> analyzeHighlight();
 
-    SharedPtr<DocumentHighlight> analyzeHighlightIncremental(const TextRange& range, const U8String& new_text);
+    SharedPtr<DocumentHighlight> analyzeHighlightIncremental(const TextRange &range, const U8String &new_text);
 
-    SharedPtr<DocumentHighlight> analyzeHighlightIncremental(size_t start_index, size_t end_index, const U8String& new_text);
+    SharedPtr<DocumentHighlight> analyzeHighlightIncremental(size_t start_index, size_t end_index, const U8String &new_text);
 
     SharedPtr<Document> getDocument() const;
 
-    const HighlightConfig& getHighlightConfig() const;
+    const HighlightConfig &getHighlightConfig() const;
+
   private:
     SharedPtr<Document> m_document_;
     SharedPtr<DocumentHighlight> m_highlight_;
@@ -101,4 +111,4 @@ namespace NS_SWEETLINE {
   NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(CodeBlock, start, end, branches)
 }
 
-#endif //SWEETLINE_INTERNAL_HIGHLIGHT_H
+#endif // SWEETLINE_INTERNAL_HIGHLIGHT_H

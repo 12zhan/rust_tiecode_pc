@@ -15,7 +15,7 @@ pub mod undo;
 #[cfg(test)]
 mod tests;
 
-use crate::editor::grammar::JIESHENG_GRAMMAR;
+use crate::editor::grammar::{CPP_GRAMMAR, JIESHENG_GRAMMAR};
 
 use self::completion::{CompletionItem, CompletionKind, CPP_KEYWORDS};
 use self::core::{EditorCore, Selection};
@@ -68,6 +68,9 @@ impl CodeEditor {
 
     pub fn new(cx: &mut Context<Self>) -> Self {
         let engine = Arc::new(Engine::new(true));
+        engine
+            .compile_json(CPP_GRAMMAR)
+            .expect("Failed to compile CPP grammar");
         engine
             .compile_json(JIESHENG_GRAMMAR)
             .expect("Failed to compile 结绳 grammar");

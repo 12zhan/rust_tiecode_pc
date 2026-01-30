@@ -16,10 +16,14 @@ fn main() {
     }
 
     // 2. 编译 SweetLine C++ 静态库
-    let dst = cmake::Config::new("native/sweetline")
-        .define("STATIC_LIB", "ON")
-        .profile("Release")
-        .build();
+    println!("cargo:rerun-if-changed=native/sweetline");
+    let mut config = cmake::Config::new("native/sweetline");
+    config.define("STATIC_LIB", "ON").profile("Release");
+    
+    #[cfg(target_os = "windows")]
+    config.cxxflag("/EHsc");
+    
+    let dst = config.build();
 
     println!("cargo:rustc-link-search=native={}/lib", dst.display());
 

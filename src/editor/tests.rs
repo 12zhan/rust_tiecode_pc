@@ -6,6 +6,32 @@ mod tests {
     use tiecode::sweetline::{Engine, Document, DocumentAnalyzer};
 
     #[test]
+    fn test_jiesheng_single_line_embedded_cpp() {
+        use crate::editor::grammar::JIESHENG_GRAMMAR;
+        let engine = Engine::new(true);
+        engine.compile_json(CPP_GRAMMAR).expect("Failed to compile CPP");
+        engine.compile_json(JIESHENG_GRAMMAR).expect("Failed to compile JIESHENG");
+
+        // Test single-line embed code
+        let code = "code int main() {}";
+        let doc = Document::new("test_single.t", code);
+        let analyzer = engine.load_document(&doc);
+        let raw_result = analyzer.analyze();
+        let spans = DocumentAnalyzer::parse_result(&raw_result, false);
+
+        let mut found_int_keyword = false;
+        for span in spans {
+            let style_name = engine.get_style_name(span.style_id).unwrap_or_default();
+            let token = &code[span.start_index as usize..span.end_index as usize];
+            println!("Token: '{}', Style: {}", token, style_name);
+            if token == "int" && style_name == "keyword" {
+                found_int_keyword = true;
+            }
+        }
+        assert!(found_int_keyword, "Should find 'int' keyword in single-line embedded C++ block");
+    }
+
+    #[test]
     fn test_cpp_highlighting() {
         let engine = Engine::new(true);
         let result = engine.compile_json(CPP_GRAMMAR);
@@ -96,6 +122,32 @@ mod tests {
         }
         assert_eq!(CodeEditor::byte_offset_for_char_offset(text, 1), 3);
         assert_eq!(CodeEditor::byte_offset_for_char_offset(text, 2), 4);
+    }
+
+    #[test]
+    fn test_jiesheng_embedded_cpp() {
+        use crate::editor::grammar::JIESHENG_GRAMMAR;
+        let engine = Engine::new(true);
+        engine.compile_json(CPP_GRAMMAR).expect("Failed to compile CPP");
+        engine.compile_json(JIESHENG_GRAMMAR).expect("Failed to compile JIESHENG");
+
+        // Test multi-line embed code
+        let code = "@code\nint main() {}\n@end";
+        let doc = Document::new("test.t", code);
+        let analyzer = engine.load_document(&doc);
+        let raw_result = analyzer.analyze();
+        let spans = DocumentAnalyzer::parse_result(&raw_result, false);
+
+        let mut found_int_keyword = false;
+        for span in spans {
+            let style_name = engine.get_style_name(span.style_id).unwrap_or_default();
+            let token = &code[span.start_index as usize..span.end_index as usize];
+            println!("Token: '{}', Style: {}", token, style_name);
+            if token == "int" && style_name == "keyword" {
+                found_int_keyword = true;
+            }
+        }
+        assert!(found_int_keyword, "Should find 'int' keyword in embedded C++ block");
     }
 
     #[test]

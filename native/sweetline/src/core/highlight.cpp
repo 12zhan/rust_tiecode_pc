@@ -260,7 +260,13 @@ namespace NS_SWEETLINE
     {
       return result;
     }
-    StateRule &state_rule = m_rule_->getStateRule(syntax_state);
+    const StateRule &state_rule = m_rule_->getStateRule(syntax_state);
+    return matchAtPosition(text, start_char_pos, state_rule);
+  }
+
+  MatchResult LineHighlightAnalyzer::matchAtPosition(const U8String &text, size_t start_char_pos, const StateRule &state_rule) const
+  {
+    MatchResult result;
     size_t start_byte_pos = Utf8Util::charPosToBytePos(text, start_char_pos);
 
     OnigRegion *region = onig_region_new();
@@ -276,6 +282,7 @@ namespace NS_SWEETLINE
       size_t match_end_byte = region->end[0];
       if (match_end_byte <= match_start_byte)
       {
+        onig_region_free(region, 1);
         return result;
       }
       size_t match_length_bytes = match_end_byte - match_start_byte;
@@ -287,10 +294,90 @@ namespace NS_SWEETLINE
       result.matched = true;
       result.start = match_start_char;
       result.length = match_length_chars;
-      result.state = syntax_state;
+      // result.state is not set here as we might not know the ID, but that's fine
       result.matched_text = Utf8Util::utf8Substr(text, match_start_char, match_length_chars);
 
       findMatchedRuleAndGroup(state_rule, region, text, match_start_byte, match_end_byte, result);
+
+      // Subpatterns
+      if (result.matched && result.token_rule_idx >= 0)
+      {
+        const TokenRule &rule = state_rule.token_rules[result.token_rule_idx];
+        if (rule.sub_state_rule)
+        {
+          size_t sub_pos = 0;
+          size_t sub_len = Utf8Util::countChars(result.matched_text);
+          while (sub_pos < sub_len)
+          {
+            MatchResult sub_res = matchAtPosition(result.matched_text, sub_pos, *rule.sub_state_rule);
+            if (!sub_res.matched)
+            {
+              break;
+            }
+
+            // Gap
+            if (sub_res.start > sub_pos)
+            {
+              TokenSpan gap;
+              gap.range.start.column = sub_pos;
+              gap.range.end.column = sub_res.start;
+              gap.style_id = result.style;
+              if (m_config_.inline_style)
+                gap.inline_style = m_rule_->getInlineStyle(result.style);
+              result.sub_spans.push_back(gap);
+            }
+
+            // Sub-match content
+            if (!sub_res.sub_spans.empty())
+            {
+              for (auto &s : sub_res.sub_spans)
+              {
+                s.range.start.column += sub_res.start;
+                s.range.end.column += sub_res.start;
+                result.sub_spans.push_back(s);
+              }
+            }
+            else if (!sub_res.capture_groups.empty())
+            {
+              for (auto &g : sub_res.capture_groups)
+              {
+                TokenSpan s;
+                s.range.start.column = g.start + sub_res.start;
+                s.range.end.column = g.start + g.length + sub_res.start;
+                s.style_id = g.style;
+                if (m_config_.inline_style)
+                  s.inline_style = m_rule_->getInlineStyle(g.style);
+                result.sub_spans.push_back(s);
+              }
+            }
+            else
+            {
+              TokenSpan s;
+              s.range.start.column = sub_res.start;
+              s.range.end.column = sub_res.start + sub_res.length;
+              s.style_id = sub_res.style;
+              if (m_config_.inline_style)
+                s.inline_style = m_rule_->getInlineStyle(sub_res.style);
+              result.sub_spans.push_back(s);
+            }
+
+            sub_pos = sub_res.start + sub_res.length;
+            if (sub_res.length == 0)
+              sub_pos++;
+          }
+          // Tail
+          if (sub_pos < sub_len)
+          {
+            TokenSpan gap;
+            gap.range.start.column = sub_pos;
+            gap.range.end.column = sub_len;
+            gap.style_id = result.style;
+            if (m_config_.inline_style)
+              gap.inline_style = m_rule_->getInlineStyle(result.style);
+            result.sub_spans.push_back(gap);
+          }
+        }
+      }
     }
     onig_region_free(region, 1);
     return result;
@@ -337,7 +424,28 @@ namespace NS_SWEETLINE
   void LineHighlightAnalyzer::addLineHighlightResult(LineHighlight &highlight, const TextLineInfo &info,
                                                      int32_t syntax_state, const MatchResult &match_result) const
   {
-    if (match_result.capture_groups.empty())
+    if (!match_result.sub_spans.empty())
+    {
+      for (const auto &sub : match_result.sub_spans)
+      {
+        TokenSpan span = sub;
+        // Shift to absolute line column
+        span.range.start.column += match_result.start;
+        span.range.end.column += match_result.start;
+
+        // Set line number
+        span.range.start.line = info.line;
+        span.range.end.line = info.line;
+
+        // Set byte index
+        span.range.start.index = info.start_char_offset + span.range.start.column;
+        span.range.end.index = info.start_char_offset + span.range.end.column;
+
+        span.state = syntax_state;
+        highlight.pushOrMergeSpan(std::move(span));
+      }
+    }
+    else if (match_result.capture_groups.empty())
     {
       TokenSpan span;
       span.range.start = {
@@ -553,7 +661,9 @@ namespace NS_SWEETLINE
 
   SharedPtr<SyntaxRule> HighlightEngine::compileSyntaxFromJson(const U8String &json)
   {
-    UniquePtr<SyntaxRuleCompiler> compiler = makeUniquePtr<SyntaxRuleCompiler>(m_style_mapping_, m_config_.inline_style);
+    auto provider = [this](const U8String &name)
+    { return this->getSyntaxRuleByName(name); };
+    UniquePtr<SyntaxRuleCompiler> compiler = makeUniquePtr<SyntaxRuleCompiler>(m_style_mapping_, m_config_.inline_style, provider);
     SharedPtr<SyntaxRule> rule = compiler->compileSyntaxFromJson(json);
     m_syntax_rules_.emplace(rule);
     return rule;
@@ -561,7 +671,9 @@ namespace NS_SWEETLINE
 
   SharedPtr<SyntaxRule> HighlightEngine::compileSyntaxFromFile(const U8String &file)
   {
-    UniquePtr<SyntaxRuleCompiler> compiler = makeUniquePtr<SyntaxRuleCompiler>(m_style_mapping_, m_config_.inline_style);
+    auto provider = [this](const U8String &name)
+    { return this->getSyntaxRuleByName(name); };
+    UniquePtr<SyntaxRuleCompiler> compiler = makeUniquePtr<SyntaxRuleCompiler>(m_style_mapping_, m_config_.inline_style, provider);
     SharedPtr<SyntaxRule> rule = compiler->compileSyntaxFromFile(file);
     m_syntax_rules_.emplace(rule);
     return rule;

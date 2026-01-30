@@ -17,10 +17,12 @@ fn main() {
     Application::new().run(|context: &mut App| {
         info!("tiecode for desktop start success!");
 
-        context.bind_keys([
+        // 获取平台来确定ctrl还是cmd
+        let ctrl_cmd = cfg!(target_os = "macos").then(|| "cmd").unwrap_or("ctrl");
+
+        let mut bindings = vec![
             KeyBinding::new("backspace", Backspace, Some("CodeEditor")),
             KeyBinding::new("delete", Delete, Some("CodeEditor")),
-            KeyBinding::new("ctrl-shift-k", DeleteLine, Some("CodeEditor")),
             KeyBinding::new("left", Left, Some("CodeEditor")),
             KeyBinding::new("right", Right, Some("CodeEditor")),
             KeyBinding::new("up", Up, Some("CodeEditor")),
@@ -28,17 +30,33 @@ fn main() {
             KeyBinding::new("enter", Enter, Some("CodeEditor")),
             KeyBinding::new("tab", Tab, Some("CodeEditor")),
             KeyBinding::new("shift-tab", ShiftTab, Some("CodeEditor")),
-            KeyBinding::new("ctrl-shift-tab", CtrlShiftTab, Some("CodeEditor")),
-            KeyBinding::new("ctrl-c", Copy, Some("CodeEditor")),
-            KeyBinding::new("ctrl-x", Cut, Some("CodeEditor")),
-            KeyBinding::new("ctrl-v", Paste, Some("CodeEditor")),
-            KeyBinding::new("ctrl-z", Undo, Some("CodeEditor")),
-            KeyBinding::new("ctrl-shift-z", Redo, Some("CodeEditor")),
-            KeyBinding::new("ctrl-f", ToggleFind, Some("CodeEditor")),
             KeyBinding::new("escape", CancelFind, Some("CodeEditor")),
             KeyBinding::new("f3", FindNext, Some("CodeEditor")),
             KeyBinding::new("shift-f3", FindPrev, Some("CodeEditor")),
+        ];
+
+        // 3. 动态拼接并添加带修饰键的绑定
+        bindings.extend([
+            KeyBinding::new(
+                &format!("{}-shift-k", ctrl_cmd),
+                DeleteLine,
+                Some("CodeEditor"),
+            ),
+            KeyBinding::new(
+                &format!("{}-shift-tab", ctrl_cmd),
+                CtrlShiftTab,
+                Some("CodeEditor"),
+            ),
+            KeyBinding::new(&format!("{}-c", ctrl_cmd), Copy, Some("CodeEditor")),
+            KeyBinding::new(&format!("{}-x", ctrl_cmd), Cut, Some("CodeEditor")),
+            KeyBinding::new(&format!("{}-v", ctrl_cmd), Paste, Some("CodeEditor")),
+            KeyBinding::new(&format!("{}-z", ctrl_cmd), Undo, Some("CodeEditor")),
+            KeyBinding::new(&format!("{}-shift-z", ctrl_cmd), Redo, Some("CodeEditor")),
+            KeyBinding::new(&format!("{}-f", ctrl_cmd), ToggleFind, Some("CodeEditor")),
         ]);
+
+        // 4. 注册所有绑定
+        context.bind_keys(bindings);
 
         let bounds = Bounds::centered(None, size(px(1200.0), px(700.0)), context);
         let _ = context.open_window(

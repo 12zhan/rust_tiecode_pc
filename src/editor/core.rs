@@ -74,6 +74,12 @@ impl EditorCore {
         self.marked_range = None;
     }
 
+    pub fn select_all(&mut self) {
+        let len = self.content.len_bytes();
+        self.selections = vec![Selection::new(0, len)];
+        self.marked_range = None;
+    }
+
     pub fn merge_selections(&mut self) {
         // Sort by start position
         self.selections.sort_by_key(|s| s.range().start);
@@ -340,5 +346,14 @@ mod tests {
         assert_eq!(core.selections.len(), 2);
         assert_eq!(core.selections[0].head, 3);
         assert_eq!(core.selections[1].head, 7);
+    }
+
+    #[test]
+    fn test_select_all() {
+        let mut core = EditorCore::new();
+        core.content = Rope::from("abc\ndef");
+        core.select_all();
+        assert_eq!(core.selections.len(), 1);
+        assert_eq!(core.selections[0].range(), 0..core.content.len_bytes());
     }
 }

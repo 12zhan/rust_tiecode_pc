@@ -36,6 +36,7 @@ actions!(
         Tab,
         ShiftTab,
         CtrlShiftTab,
+        SelectAll,
         Copy,
         Cut,
         Paste,
@@ -47,6 +48,48 @@ actions!(
         CancelFind
     ]
 );
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecorationColor {
+    Gray,
+    Yellow,
+    Red,
+    Custom(u32),
+}
+
+impl DecorationColor {
+    fn rgba(self) -> Rgba {
+        match self {
+            Self::Gray => rgba(0xffffff80),
+            Self::Yellow => rgba(0xffd7ba66),
+            Self::Red => rgba(0xfff14c4c),
+            Self::Custom(c) => rgba(c),
+        }
+    }
+
+    fn priority(self) -> u8 {
+        match self {
+            Self::Red => 3,
+            Self::Yellow => 2,
+            Self::Gray => 1,
+            Self::Custom(_) => 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Decoration {
+    pub range: Range<usize>,
+    pub color: DecorationColor,
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct HoverPopup {
+    text: String,
+    position: Point<Pixels>,
+    color: DecorationColor,
+}
 
 pub struct CodeEditor {
     pub focus_handle: FocusHandle,
@@ -61,6 +104,8 @@ pub struct CodeEditor {
     sweetline_analyzer: Option<DocumentAnalyzer>,
     cached_highlights: Vec<HighlightSpan>,
     style_cache: HashMap<u32, Hsla>,
+    decorations: Vec<Decoration>,
+    hover_popup: Option<HoverPopup>,
 }
 
 impl CodeEditor {
@@ -92,7 +137,20 @@ impl CodeEditor {
             sweetline_analyzer: Some(analyzer),
             cached_highlights: Vec::new(),
             style_cache: HashMap::new(),
+            decorations: Vec::new(),
+            hover_popup: None,
         }
+    }
+
+    pub fn set_decorations(&mut self, decorations: Vec<Decoration>, cx: &mut Context<Self>) {
+        self.decorations = decorations;
+        cx.notify();
+    }
+
+    pub fn clear_decorations(&mut self, cx: &mut Context<Self>) {
+        self.decorations.clear();
+        self.hover_popup = None;
+        cx.notify();
     }
 
     pub fn set_content(&mut self, content: String, cx: &mut Context<Self>) {
@@ -384,6 +442,12 @@ impl CodeEditor {
         cx.notify();
     }
 
+    fn select_all(&mut self, _: &SelectAll, _window: &mut Window, cx: &mut Context<Self>) {
+        self.core.select_all();
+        self.core.completion_active = false;
+        cx.notify();
+    }
+
     fn copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
         let mut texts = Vec::new();
         for selection in &self.core.selections {
@@ -585,11 +649,55 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         if _window.modifiers().control {
+            let old_font_size = self.layout.font_size;
+            let old_line_height = self.layout.line_height();
+            let old_scroll_offset = self.layout.scroll_offset;
             let delta = event.delta.pixel_delta(px(10.0)).y;
             self.layout.zoom(delta);
+            let new_font_size = self.layout.font_size;
+            let new_line_height = self.layout.line_height();
+
+            let x_ratio = if old_font_size > px(0.0) {
+                new_font_size / old_font_size
+            } else {
+                1.0
+            };
+            let y_ratio = if old_line_height > px(0.0) {
+                new_line_height / old_line_height
+            } else {
+                1.0
+            };
+
+            self.layout.scroll_offset.x = old_scroll_offset.x * x_ratio;
+            self.layout.scroll_offset.y = old_scroll_offset.y * y_ratio;
+
             if let Ok(mut cache) = self.render_cache.lock() {
                 cache.clear();
             }
+
+            let bounds = self.layout.last_bounds.unwrap_or_default();
+            let view_size = bounds.size;
+
+            let line_count = self.core.content.len_lines().max(1);
+            let total_height = self.layout.line_height() * line_count as f32;
+            let max_scroll_y =
+                (total_height - view_size.height + self.layout.line_height()).max(px(0.0));
+
+            let max_line_len = self
+                .core
+                .content
+                .lines()
+                .map(|l| l.len_bytes())
+                .max()
+                .unwrap_or(0);
+            let max_digits = line_count.to_string().len();
+            let gutter_width = self.layout.gutter_width(max_digits);
+            let char_width = self.layout.font_size * 0.75;
+            let content_width = gutter_width + px(40.0) + (max_line_len as f32 * char_width);
+            let max_scroll_x = (content_width - view_size.width).max(px(0.0));
+
+            self.layout.scroll_offset.y = self.layout.scroll_offset.y.clamp(-max_scroll_y, px(0.0));
+            self.layout.scroll_offset.x = self.layout.scroll_offset.x.clamp(-max_scroll_x, px(0.0));
         } else {
             let delta = event.delta.pixel_delta(px(20.0));
 
@@ -617,6 +725,52 @@ impl CodeEditor {
             self.layout.scroll(delta, point(max_scroll_x, max_scroll_y));
         }
         cx.notify();
+    }
+
+    fn paint_squiggly(
+        window: &mut Window,
+        x0: Pixels,
+        x1: Pixels,
+        y: Pixels,
+        line_height: Pixels,
+        color: Rgba,
+    ) {
+        if x1 <= x0 {
+            return;
+        }
+        let amplitude = (line_height * 0.14).clamp(px(2.5), px(6.0));
+        let period = (line_height * 0.9).clamp(px(10.0), px(18.0));
+        let amplitude_f = f32::from(amplitude);
+        let period_f = f32::from(period);
+        let x0_f = f32::from(x0);
+        let omega = std::f32::consts::TAU / period_f;
+        let phase = (x0_f / period_f) * std::f32::consts::TAU;
+        let vertical_shift = amplitude;
+
+        let stroke_width = (line_height * 0.11).clamp(px(1.5), px(2.5));
+        let sample_step = (line_height * 0.12).clamp(px(1.0), px(3.0));
+
+        let mut builder = PathBuilder::stroke(stroke_width);
+        let y0 = y + px(amplitude_f * (omega * x0_f + phase).sin()) + vertical_shift;
+        builder.move_to(point(x0, y0));
+
+        let mut x = x0 + sample_step;
+        while x <= x1 {
+            let yy =
+                y + px(amplitude_f * (omega * f32::from(x) + phase).sin()) + vertical_shift;
+            builder.line_to(point(x, yy));
+            x += sample_step;
+        }
+
+        if x != x1 {
+            let yy =
+                y + px(amplitude_f * (omega * f32::from(x1) + phase).sin()) + vertical_shift;
+            builder.line_to(point(x1, yy));
+        }
+
+        if let Ok(path) = builder.build() {
+            window.paint_path(path, Background::from(color));
+        }
     }
 
     fn get_cached_shape_line(
@@ -1130,6 +1284,52 @@ impl EntityInputHandler for CodeEditor {
 }
 
 impl CodeEditor {
+    fn hover_info_at(&self, index: usize) -> Option<(String, DecorationColor)> {
+        let mut best: Option<(&Decoration, usize)> = None;
+        for d in &self.decorations {
+            if d.message.is_none() {
+                continue;
+            }
+            if index < d.range.start || index >= d.range.end {
+                continue;
+            }
+            let len = d.range.end.saturating_sub(d.range.start);
+            match best {
+                None => best = Some((d, len)),
+                Some((prev, prev_len)) => {
+                    if len < prev_len
+                        || (len == prev_len && d.color.priority() > prev.color.priority())
+                    {
+                        best = Some((d, len));
+                    }
+                }
+            }
+        }
+        best.map(|(d, _)| (d.message.clone().unwrap_or_default(), d.color))
+            .filter(|(t, _)| !t.is_empty())
+    }
+
+    fn update_hover_popup(&mut self, pos: Point<Pixels>, window: &Window, cx: &mut Context<Self>) {
+        let index = self.index_for_point(pos, window);
+        let next = index
+            .and_then(|i| self.hover_info_at(i))
+            .map(|(text, color)| HoverPopup {
+                text,
+                position: pos,
+                color,
+            });
+
+        let changed = match (&self.hover_popup, &next) {
+            (None, None) => false,
+            (Some(_), None) | (None, Some(_)) => true,
+            (Some(a), Some(b)) => a.text != b.text || a.color != b.color,
+        };
+        if changed {
+            self.hover_popup = next;
+            cx.notify();
+        }
+    }
+
     fn index_for_point(&self, point: Point<Pixels>, window: &Window) -> Option<usize> {
         let bounds = self.layout.last_bounds?;
         let content = &self.core.content;
@@ -1208,10 +1408,13 @@ impl CodeEditor {
             }
         }
 
+        self.hover_popup = None;
+
         if let Some(index) = self.index_for_point(event.position, window) {
             if event.modifiers.alt {
                 // Add cursor
                 self.core.add_cursor(index);
+                cx.notify();
             } else if event.modifiers.shift {
                 // Extend last selection
                 self.select_to(index, cx);
@@ -1272,6 +1475,7 @@ impl CodeEditor {
         }
 
         if event.pressed_button.is_none() {
+            self.update_hover_popup(event.position, window, cx);
             return;
         }
         if let Some(index) = self.index_for_point(event.position, window) {
@@ -1305,6 +1509,7 @@ impl Render for CodeEditor {
             .on_action(cx.listener(Self::move_right))
             .on_action(cx.listener(Self::move_up))
             .on_action(cx.listener(Self::move_down))
+            .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
@@ -1341,6 +1546,8 @@ pub fn code_editor_canvas(
                 completion_active,
                 completion_items,
                 completion_index,
+                decorations,
+                hover_popup,
             ) = {
                 let state = editor.read(cx);
                 (
@@ -1350,6 +1557,8 @@ pub fn code_editor_canvas(
                     state.core.completion_active,
                     state.core.completion_items.clone(),
                     state.core.completion_index,
+                    state.decorations.clone(),
+                    state.hover_popup.clone(),
                 )
             };
 
@@ -1478,11 +1687,44 @@ pub fn code_editor_canvas(
                             text_line
                                 .paint(point(text_x, y), line_height, window, cx)
                                 .ok();
+
+                            for d in &decorations {
+                                let line_end_incl_newline = line_start + line_slice.len_bytes();
+                                let deco_start = d.range.start.max(line_start);
+                                let deco_end = d.range.end.min(line_end_incl_newline);
+                                if deco_start >= deco_end {
+                                    continue;
+                                }
+
+                                let line_len = line_text.len();
+                                let start_in_line = (deco_start - line_start).min(line_len);
+                                let end_in_line = (deco_end - line_start).min(line_len);
+                                if start_in_line >= end_in_line {
+                                    continue;
+                                }
+
+                                let shape_start =
+                                    CodeEditor::clamp_to_char_boundary(line_text, start_in_line);
+                                let shape_end =
+                                    CodeEditor::clamp_to_char_boundary(line_text, end_in_line);
+                                let start_x = text_line.x_for_index(shape_start);
+                                let end_x = text_line.x_for_index(shape_end);
+                                let underline_y = y + line_height - px(4.0);
+                                CodeEditor::paint_squiggly(
+                                    window,
+                                    text_x + start_x,
+                                    text_x + end_x,
+                                    underline_y,
+                                    line_height,
+                                    d.color.rgba(),
+                                );
+                            }
                         }
 
                         // Draw Cursors
                         for selection in &selections {
                             let head = selection.head;
+                            let is_primary = selection.anchor == primary.anchor && selection.head == primary.head;
                             let (line, _, line_start) =
                                 CodeEditor::line_col_for_index(&content, head);
 
@@ -1503,11 +1745,18 @@ pub fn code_editor_canvas(
                                 let local_index = head.saturating_sub(line_start);
                                 let cursor_x = text_x + line_shape.x_for_index(local_index);
                                 let cursor_y = layout.line_y(bounds, line);
+                                let caret_width = if is_primary { px(2.0) } else { px(1.0) };
+                                let caret_height = (line_height - px(2.0)).max(px(0.0));
                                 let cursor_bounds = Bounds::new(
-                                    point(cursor_x, cursor_y),
-                                    size(px(1.0), line_height),
+                                    point(cursor_x, cursor_y + px(1.0)),
+                                    size(caret_width, caret_height),
                                 );
-                                window.paint_quad(fill(cursor_bounds, rgb(0xffffffff)));
+                                let color = if is_primary {
+                                    rgb(0xffffffff)
+                                } else {
+                                    rgba(0xffffffb3)
+                                };
+                                window.paint_quad(fill(cursor_bounds, color));
                             }
                         }
 
@@ -1627,6 +1876,41 @@ pub fn code_editor_canvas(
                         }
                     },
                 );
+
+                if let Some(hover) = &hover_popup {
+                    let popup_font = font_size.min(px(14.0));
+                    let popup_line_height = popup_font * 1.4;
+                    let text_line =
+                        CodeEditor::shape_line(window, &hover.text, rgb(0xffffffff).into(), popup_font);
+
+                    let padding_x = px(10.0);
+                    let padding_y = px(6.0);
+                    let popup_w = (text_line.width + padding_x * 2.0).max(px(60.0));
+                    let popup_h = popup_line_height + padding_y * 2.0;
+
+                    let mut x = hover.position.x + px(12.0);
+                    let mut y = hover.position.y + px(18.0);
+                    x = x
+                        .min(bounds.right() - popup_w - px(4.0))
+                        .max(bounds.left() + px(4.0));
+                    y = y
+                        .min(bounds.bottom() - popup_h - px(4.0))
+                        .max(bounds.top() + px(4.0));
+
+                    let popup_bounds = Bounds::new(point(x, y), size(popup_w, popup_h));
+                    let mut popup_quad = fill(popup_bounds, rgba(0x1e1e1ef0));
+                    popup_quad.border_widths = Edges::all(px(1.0));
+                    popup_quad.border_color = hover.color.rgba().into();
+                    window.paint_quad(popup_quad);
+                    text_line
+                        .paint(
+                            point(x + padding_x, y + padding_y),
+                            popup_line_height,
+                            window,
+                            cx,
+                        )
+                        .ok();
+                }
             });
         },
     )

@@ -40,6 +40,34 @@ jobs:
           path: target/release/tiecode
           if-no-files-found: error
 
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install LLVM (for bindgen)
+        run: |
+          choco install -y llvm
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build (release)
+        run: cargo build --release --verbose
+
+      - name: Run tests
+        run: cargo test --release --verbose -- --test-threads=1
+
+      - name: Upload Windows binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: myapp-windows
+          path: target/release/tiecode.exe
+          if-no-files-found: error
+
   build-macos:
     runs-on: macos-latest
 

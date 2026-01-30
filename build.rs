@@ -32,7 +32,10 @@ fn main() {
 
     // 3. 链接 C++ 标准库
     #[cfg(target_os = "linux")]
-    println!("cargo:rustc-link-lib=dylib=stdc++");
+    {
+        println!("cargo:rustc-link-lib=dylib=stdc++");
+        println!("cargo:rustc-link-lib=dylib=onig");
+    }
     #[cfg(target_os = "macos")]
     {
         println!("cargo:rustc-link-lib=dylib=c++");

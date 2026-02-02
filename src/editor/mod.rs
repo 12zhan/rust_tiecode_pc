@@ -5,6 +5,11 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+
+use crate::lsp::{LspClient, JsonRpcMessage};
+use crate::lsp::jflsp::default_doc_uri;
+use serde_json::{json, Value};
 
 pub mod completion;
 pub mod core;
@@ -17,7 +22,7 @@ mod tests;
 
 use crate::editor::grammar::{CPP_GRAMMAR, JIESHENG_GRAMMAR};
 
-use self::completion::{CompletionItem, CompletionKind, CPP_KEYWORDS};
+use self::completion::{CompletionItem, CompletionKind};
 use self::core::{EditorCore, Selection};
 use self::layout::EditorLayout;
 use tiecode::sweetline::{Document, DocumentAnalyzer, Engine, HighlightSpan};
@@ -45,24 +50,28 @@ actions!(
         ToggleFind,
         FindNext,
         FindPrev,
-        CancelFind
+        CancelFind,
+        Escape
     ]
 );
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecorationColor {
     Gray,
+    #[allow(dead_code)]
     Yellow,
+    #[allow(dead_code)]
     Red,
+    #[allow(dead_code)]
     Custom(u32),
 }
 
 impl DecorationColor {
     fn rgba(self) -> Rgba {
         match self {
-            Self::Gray => rgba(0xffffff80),
-            Self::Yellow => rgba(0xffd7ba66),
-            Self::Red => rgba(0xfff14c4c),
+            Self::Gray => rgba(0x928374FF), // Gruvbox gray #928374
+            Self::Yellow => rgba(0xd79921FF), // Gruvbox yellow #d79921
+            Self::Red => rgba(0xcc241dFF), // Gruvbox red #cc241d
             Self::Custom(c) => rgba(c),
         }
     }
@@ -91,6 +100,63 @@ struct HoverPopup {
     color: DecorationColor,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum LspRequestKind {
+    #[allow(dead_code)]
+    Initialize,
+    Completion { index: usize },
+    Hover { index: usize, #[allow(dead_code)] pos: Point<Pixels> },
+}
+
+
+struct JflspRuntime {
+    client: LspClient,
+    _process: std::process::Child,
+}
+
+impl JflspRuntime {
+    fn new() -> Option<Self> {
+        let lsp_path = std::env::var("JFLSP_PATH").ok().or_else(|| {
+             let paths = [
+                 "jflsp.exe",
+                 "../jflsp.exe",
+                 "D:\\project\\jflsp\\target\\release\\jflsp.exe",
+                 "C:\\Users\\xiaoa\\Desktop\\tie_rust_gpui\\tiecode\\jflsp.exe"
+             ];
+             for p in paths {
+                 if std::path::Path::new(p).exists() {
+                     return Some(p.to_string());
+                 }
+             }
+             Some("D:\\project\\jflsp\\target\\release\\jflsp.exe".to_string())
+        })?;
+        
+        let path = PathBuf::from(lsp_path);
+        if !path.exists() {
+            println!("JFLSP not found at {:?}", path);
+            return None;
+        }
+
+        match LspClient::stdio(&path) {
+            Ok((client, process)) => {
+                println!("JFLSP started");
+                Some(Self { client, _process: process })
+            }
+            Err(e) => {
+                println!("Failed to start JFLSP: {}", e);
+                None
+            }
+        }
+    }
+
+    fn poll_message(&mut self) -> Option<JsonRpcMessage> {
+        match self.client.receiver.try_recv() {
+            Ok(msg) => Some(msg),
+            Err(_) => None,
+        }
+    }
+}
+
 pub struct CodeEditor {
     pub focus_handle: FocusHandle,
     pub core: EditorCore,
@@ -106,11 +172,14 @@ pub struct CodeEditor {
     style_cache: HashMap<u32, Hsla>,
     decorations: Vec<Decoration>,
     hover_popup: Option<HoverPopup>,
+    jflsp_runtime: Option<JflspRuntime>,
+    pending_request: Option<(usize, LspRequestKind)>,
+    completion_scroll_offset: f32,
+    lsp_version: i32,
+    doc_uri: String,
 }
 
 impl CodeEditor {
-    const DEFAULT_DOC_URI: &'static str = "untitled.t";
-
     pub fn new(cx: &mut Context<Self>) -> Self {
         let engine = Arc::new(Engine::new(true));
         engine
@@ -120,11 +189,11 @@ impl CodeEditor {
             .compile_json(JIESHENG_GRAMMAR)
             .expect("Failed to compile 结绳 grammar");
 
-        // Initialize empty document
-        let doc = Document::new(Self::DEFAULT_DOC_URI, "");
+        let doc_uri = default_doc_uri();
+        let doc = Document::new(&doc_uri, "");
         let analyzer = engine.load_document(&doc);
 
-        Self {
+        let mut editor = Self {
             focus_handle: cx.focus_handle(),
             core: EditorCore::new(),
             layout: EditorLayout::new(),
@@ -139,14 +208,125 @@ impl CodeEditor {
             style_cache: HashMap::new(),
             decorations: Vec::new(),
             hover_popup: None,
+            jflsp_runtime: JflspRuntime::new(),
+            pending_request: None,
+            completion_scroll_offset: 0.0,
+            lsp_version: 1,
+            doc_uri,
+        };
+
+        editor.init_lsp(cx);
+        editor
+    }
+
+    fn init_lsp(&mut self, cx: &mut Context<Self>) {
+         if let Some(runtime) = &mut self.jflsp_runtime {
+             let mut jars = std::env::var("JFLSP_JARS")
+                 .ok()
+                 .map(|v| {
+                     v.split(';')
+                         .map(|s| s.trim())
+                         .filter(|s| !s.is_empty())
+                         .map(|s| s.to_string())
+                         .collect::<Vec<_>>()
+                 })
+                 .unwrap_or_default();
+             if let Ok(android_jar) = std::env::var("ANDROID_JAR") {
+                 let v = android_jar.trim();
+                 if !v.is_empty() {
+                     jars.push(v.to_string());
+                 }
+            } else {
+                let default_android_jar = r#"C:\Users\xiaoa\.tiecode\sdk\android-33-fix\android.jar"#;
+                if std::path::Path::new(default_android_jar).exists() {
+                    jars.push(default_android_jar.to_string());
+                }
+             }
+             let java_sources = std::env::var("JFLSP_JAVA_SOURCES")
+                 .ok()
+                 .map(|v| {
+                     v.split(';')
+                         .map(|s| s.trim())
+                         .filter(|s| !s.is_empty())
+                         .map(|s| s.to_string())
+                         .collect::<Vec<_>>()
+                 })
+                 .unwrap_or_default();
+             let params = json!({
+                 "processId": std::process::id(),
+                 "rootUri": null,
+                 "capabilities": {},
+                 "initializationOptions": {
+                     "jars": jars,
+                     "javaSources": java_sources
+                 }
+             });
+             
+             let _ = runtime.client.send_request("initialize", params);
+             let _ = runtime.client.send_notification("initialized", json!({}));
+             
+             let text = "";
+             let did_open_params = json!({
+                 "textDocument": {
+                     "uri": self.doc_uri.clone(),
+                     "languageId": "tiecode",
+                     "version": self.lsp_version,
+                     "text": text
+                 }
+             });
+             let _ = runtime.client.send_notification("textDocument/didOpen", did_open_params);
+         }
+
+         cx.spawn(|editor: gpui::WeakEntity<CodeEditor>, cx: &mut gpui::AsyncApp| {
+             let mut cx = cx.clone();
+             async move {
+                 loop {
+                     cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
+                     let _ = editor.update(&mut cx, |editor, cx| {
+                         editor.process_lsp_messages(cx);
+                     });
+                 }
+             }
+         }).detach();
+    }
+
+    fn paint_soft_shadow(window: &mut Window, bounds: Bounds<Pixels>, corner_radius: Pixels) {
+        let steps = 10;
+        let max_blur = px(24.0);
+        let max_alpha = 0.12;
+        let offset_y = px(4.0);
+
+        for i in 1..=steps {
+            let t = i as f32 / steps as f32;
+            let spread = max_blur * t;
+            let current_offset_y = offset_y * t;
+            
+            let shadow_bounds = Bounds::from_corners(
+                point(bounds.left() - spread, bounds.top() - spread + current_offset_y),
+                point(bounds.right() + spread, bounds.bottom() + spread + current_offset_y),
+            );
+            
+            let decay_factor = (1.0 - t).powi(2);
+            let current_alpha = max_alpha * decay_factor;
+            
+            if current_alpha > 0.0 {
+                let color = gpui::hsla(0.0, 0.0, 0.0, current_alpha);
+                let radius = corner_radius + spread;
+                
+                let mut quad = fill(shadow_bounds, color);
+                quad.corner_radii = Corners::all(radius);
+                window.paint_quad(quad);
+            }
         }
     }
 
+    #[allow(dead_code)]
     pub fn set_decorations(&mut self, decorations: Vec<Decoration>, cx: &mut Context<Self>) {
         self.decorations = decorations;
         cx.notify();
     }
 
+    #[allow(dead_code)]
     pub fn clear_decorations(&mut self, cx: &mut Context<Self>) {
         self.decorations.clear();
         self.hover_popup = None;
@@ -154,136 +334,229 @@ impl CodeEditor {
     }
 
     pub fn set_content(&mut self, content: String, cx: &mut Context<Self>) {
-        self.core.content = Rope::from(content);
+        self.core.content = Rope::from(content.clone());
         self.sync_sweetline_document();
         self.core.set_cursor(0);
+        
+        if let Some(runtime) = &mut self.jflsp_runtime {
+             self.lsp_version += 1;
+             let did_change_params = json!({
+                "textDocument": {
+                    "uri": self.doc_uri.clone(),
+                    "version": self.lsp_version
+                },
+                "contentChanges": [{
+                    "text": content
+                }]
+            });
+            let _ = runtime.client.send_notification("textDocument/didChange", did_change_params);
+        }
+        
         cx.notify();
     }
 
     pub fn set_cursor(&mut self, index: usize, cx: &mut Context<Self>) {
         self.core.set_cursor(index);
+        self.core.completion_active = false;
+        self.hover_popup = None;
         cx.notify();
     }
 
     pub fn select_to(&mut self, index: usize, cx: &mut Context<Self>) {
         self.core.select_to(index);
+        self.core.completion_active = false;
         cx.notify();
     }
 
     pub fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.core.insert_text(text);
         self.sync_sweetline_document();
+        self.notify_lsp_change(text);
         self.update_completion(cx);
         cx.notify();
     }
 
+    fn notify_lsp_change(&mut self, _text: &str) {
+        if let Some(runtime) = &mut self.jflsp_runtime {
+            self.lsp_version += 1;
+            let content = self.core.content.to_string();
+            let did_change_params = json!({
+                "textDocument": {
+                    "uri": self.doc_uri.clone(),
+                    "version": self.lsp_version
+                },
+                "contentChanges": [{
+                    "text": content
+                }]
+            });
+            let _ = runtime.client.send_notification("textDocument/didChange", did_change_params);
+        }
+    }
+
+    #[allow(dead_code)]
     pub fn delete_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
         self.core.delete_range(range);
         self.sync_sweetline_document();
+        self.notify_lsp_change("");
         self.update_completion(cx);
         cx.notify();
     }
 
+    fn process_lsp_messages(&mut self, cx: &mut Context<Self>) {
+        let mut messages = Vec::new();
+        if let Some(runtime) = &mut self.jflsp_runtime {
+             while let Some(msg) = runtime.poll_message() {
+                 println!("LSP Message: {:?}", msg);
+                 messages.push(msg);
+             }
+        }
+
+        for msg in messages {
+            self.handle_lsp_message(msg, cx);
+        }
+    }
+
+    fn handle_lsp_message(&mut self, msg: JsonRpcMessage, cx: &mut Context<Self>) {
+        match msg {
+            JsonRpcMessage::Response(resp) => {
+                if let Some(error) = &resp.error {
+                    println!("LSP Error: {:?}", error);
+                }
+                
+                if let Some((id, kind)) = self.pending_request {
+                     let matches = match &resp.id {
+                         Some(Value::Number(n)) => n.as_u64().map(|v| v as usize) == Some(id),
+                         _ => false,
+                     };
+
+                     if matches {
+                         if let Some(result) = &resp.result {
+                             match kind {
+                                 LspRequestKind::Completion { .. } => {
+                                     let mut items = Vec::new();
+                                     if let Some(arr) = result.as_array() {
+                                         for item in arr {
+                                             if let Some(label) = item["label"].as_str() {
+                                                 let detail = item["detail"].as_str().unwrap_or("").to_string();
+                                                 let kind_idx = item["kind"].as_u64().unwrap_or(1);
+                                                 let kind = match kind_idx {
+                                                     2 => CompletionKind::Function,
+                                                     3 => CompletionKind::Function, // Constructor
+                                                     6 => CompletionKind::Variable,
+                                                     7 => CompletionKind::Class,
+                                                     14 => CompletionKind::Keyword,
+                                                     _ => CompletionKind::Text,
+                                                 };
+                                                 
+                                                 items.push(CompletionItem {
+                                                     label: label.to_string(),
+                                                     kind,
+                                                     detail,
+                                                 });
+                                             }
+                                         }
+                                     } else if let Some(obj) = result.as_object() {
+                                         if let Some(arr) = obj.get("items").and_then(|i| i.as_array()) {
+                                             for item in arr {
+                                                 if let Some(label) = item["label"].as_str() {
+                                                     let detail = item["detail"].as_str().unwrap_or("").to_string();
+                                                     let kind_idx = item["kind"].as_u64().unwrap_or(1);
+                                                     let kind = match kind_idx {
+                                                         2 => CompletionKind::Function,
+                                                         3 => CompletionKind::Function,
+                                                         6 => CompletionKind::Variable,
+                                                         7 => CompletionKind::Class,
+                                                         14 => CompletionKind::Keyword,
+                                                         _ => CompletionKind::Text,
+                                                     };
+                                                     
+                                                     items.push(CompletionItem {
+                                                         label: label.to_string(),
+                                                         kind,
+                                                         detail,
+                                                     });
+                                                 }
+                                             }
+                                         }
+                                     }
+                                     
+                                     self.core.completion_items = items;
+                                    self.core.completion_active = !self.core.completion_items.is_empty();
+                                    self.core.completion_index = 0;
+                                    self.completion_scroll_offset = 0.0;
+                                    cx.notify();
+                                 }
+                                 LspRequestKind::Hover { pos, .. } => {
+                                     if let Some(contents) = result.get("contents") {
+                                         let text = if let Some(s) = contents.as_str() {
+                                             s.to_string()
+                                         } else if let Some(obj) = contents.as_object() {
+                                             obj.get("value").and_then(|v| v.as_str()).unwrap_or("").to_string()
+                                         } else {
+                                              "".to_string()
+                                         };
+                                         
+                                         if !text.is_empty() {
+                                             self.hover_popup = Some(HoverPopup {
+                                                 text,
+                                                 position: pos,
+                                                 color: DecorationColor::Gray,
+                                             });
+                                             cx.notify();
+                                         }
+                                     }
+                                 }
+                                 _ => {}
+                             }
+                         }
+                         self.pending_request = None;
+                     }
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn update_completion(&mut self, cx: &mut Context<Self>) {
+        self.process_lsp_messages(cx);
+
         let primary = self.core.primary_selection();
         if primary.is_empty() {
             let cursor = primary.head;
-            let content = &self.core.content;
-
-            let mut word_start = cursor;
-            let mut current_idx = cursor;
-
-            while current_idx > 0 {
-                let char_idx = content.byte_to_char(current_idx);
-                if char_idx == 0 && current_idx > 0 {
-                    break;
+            let (line, col) = self.lsp_position_for_index(cursor);
+            let params = json!({
+                "textDocument": {
+                    "uri": self.doc_uri.clone()
+                },
+                "position": {
+                    "line": line,
+                    "character": col
                 }
-                let prev_char_idx = char_idx - 1;
-                let ch = content.char(prev_char_idx);
-                let char_len = ch.len_utf8();
-                let prev_byte_idx = current_idx - char_len;
-
-                if !ch.is_alphanumeric() && ch != '_' && ch != '#' {
-                    word_start = current_idx;
-                    break;
+            });
+            if let Some(runtime) = &mut self.jflsp_runtime {
+                if let Ok(id) = runtime.client.send_request("textDocument/completion", params) {
+                    self.pending_request = Some((id, LspRequestKind::Completion { index: cursor }));
                 }
-                current_idx = prev_byte_idx;
-                word_start = current_idx;
-            }
-
-            if word_start < cursor {
-                let prefix_string = content.byte_slice(word_start..cursor).to_string();
-                let prefix = prefix_string.as_str();
-
-                if !prefix.is_empty() {
-                    let mut items = Vec::new();
-
-                    // Add mock data
-                    let mock_data = vec![
-                        CompletionItem {
-                            label: "main".to_string(),
-                            kind: CompletionKind::Function,
-                            detail: " void".to_string(),
-                        },
-                        CompletionItem {
-                            label: "miss".to_string(),
-                            kind: CompletionKind::Class,
-                            detail: " class".to_string(),
-                        },
-                        CompletionItem {
-                            label: "miii".to_string(),
-                            kind: CompletionKind::Text,
-                            detail: " text".to_string(),
-                        },
-                        CompletionItem {
-                            label: "min".to_string(),
-                            kind: CompletionKind::Variable,
-                            detail: " int".to_string(),
-                        },
-                        CompletionItem {
-                            label: "ant".to_string(),
-                            kind: CompletionKind::Variable,
-                            detail: " int".to_string(),
-                        },
-                        CompletionItem {
-                            label: "Demo".to_string(),
-                            kind: CompletionKind::Class,
-                            detail: "".to_string(),
-                        },
-                    ];
-                    for item in mock_data {
-                        if item.label.starts_with(prefix) && item.label != prefix {
-                            items.push(item);
-                        }
-                    }
-
-                    // Add CPP keywords
-                    for keyword in CPP_KEYWORDS {
-                        if keyword.starts_with(prefix) && *keyword != prefix {
-                            items.push(CompletionItem {
-                                label: keyword.to_string(),
-                                kind: CompletionKind::Keyword,
-                                detail: "".to_string(),
-                            });
-                        }
-                    }
-
-                    if !items.is_empty() {
+            } else {
+            // Fallback when JFLSP is missing: Show warning if triggered by '.'
+                if cursor > 0 {
+                    let prev_char_idx = self.core.content.byte_to_char(cursor) - 1;
+                    let prev_char = self.core.content.char(prev_char_idx);
+                    if prev_char == '.' {
+                        self.core.completion_items = vec![
+                            CompletionItem {
+                                label: "JFLSP Missing".to_string(),
+                                kind: CompletionKind::Text,
+                                detail: "jflsp.exe not found".to_string(),
+                            }
+                        ];
                         self.core.completion_active = true;
-                        self.core.completion_items = items;
                         self.core.completion_index = 0;
+                        self.completion_scroll_offset = 0.0;
                         cx.notify();
-                        return;
                     }
                 }
             }
-        }
-
-        if self.core.completion_active {
-            self.core.completion_active = false;
-            self.core.completion_items.clear();
-            self.core.completion_index = 0;
-            cx.notify();
         }
     }
 
@@ -424,6 +697,7 @@ impl CodeEditor {
         println!("special: shift-tab");
     }
 
+    #[allow(dead_code)]
     fn ctrl_shift_tab(&mut self, _: &CtrlShiftTab, _window: &mut Window, _cx: &mut Context<Self>) {
         println!("special: ctrl-shift-tab");
     }
@@ -547,10 +821,23 @@ impl CodeEditor {
         cx.notify();
     }
 
+    fn ensure_completion_visible(&mut self) {
+        let max_visible_items = 10;
+        let current_scroll = self.completion_scroll_offset as usize;
+        let index = self.core.completion_index;
+        
+        if index < current_scroll {
+            self.completion_scroll_offset = index as f32;
+        } else if index >= current_scroll + max_visible_items {
+            self.completion_scroll_offset = (index - max_visible_items + 1) as f32;
+        }
+    }
+
     fn move_up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
         if self.core.completion_active {
             if self.core.completion_index > 0 {
                 self.core.completion_index -= 1;
+                self.ensure_completion_visible();
                 cx.notify();
             }
             return;
@@ -801,11 +1088,11 @@ impl CodeEditor {
     fn sync_sweetline_document(&mut self) {
         let text = self.core.content.to_string();
 
-        let _ = self.sweetline_engine.remove_document(Self::DEFAULT_DOC_URI);
+        let _ = self.sweetline_engine.remove_document(&self.doc_uri);
         self.sweetline_analyzer = None;
         self.sweetline_document = None;
 
-        let doc = Document::new(Self::DEFAULT_DOC_URI, &text);
+        let doc = Document::new(&self.doc_uri, &text);
         let analyzer = self.sweetline_engine.load_document(&doc);
 
         self.sweetline_document = Some(doc);
@@ -950,6 +1237,18 @@ impl CodeEditor {
         let line_start = content.line_to_byte(line_index);
         let col = index - line_start;
         (line_index, col, line_start)
+    }
+
+    fn lsp_position_for_index(&self, index: usize) -> (usize, usize) {
+        let content = &self.core.content;
+        let len = content.len_bytes();
+        let clamped = index.min(len);
+        let line_index = content.byte_to_line(clamped);
+        let line_start_byte = content.line_to_byte(line_index);
+        let line_start_char = content.byte_to_char(line_start_byte);
+        let index_char = content.byte_to_char(clamped);
+        let col_utf16 = content.slice(line_start_char..index_char).len_utf16_cu();
+        (line_index, col_utf16)
     }
 
     fn index_for_line_col(content: &Rope, line: usize, col: usize) -> usize {
@@ -1310,7 +1609,11 @@ impl CodeEditor {
     }
 
     fn update_hover_popup(&mut self, pos: Point<Pixels>, window: &Window, cx: &mut Context<Self>) {
+        self.process_lsp_messages(cx);
+
         let index = self.index_for_point(pos, window);
+        
+        // Check local decorations first
         let next = index
             .and_then(|i| self.hover_info_at(i))
             .map(|(text, color)| HoverPopup {
@@ -1319,14 +1622,42 @@ impl CodeEditor {
                 color,
             });
 
-        let changed = match (&self.hover_popup, &next) {
-            (None, None) => false,
-            (Some(_), None) | (None, Some(_)) => true,
-            (Some(a), Some(b)) => a.text != b.text || a.color != b.color,
-        };
-        if changed {
-            self.hover_popup = next;
-            cx.notify();
+        if let Some(next_popup) = next {
+             self.hover_popup = Some(next_popup);
+             cx.notify();
+             return;
+        }
+        
+        // If no local decoration, request from LSP
+        if let Some(idx) = index {
+            let (line, col) = self.lsp_position_for_index(idx);
+            if let Some(runtime) = &mut self.jflsp_runtime {
+                // Only send if we aren't already waiting for this hover or if we moved enough?
+                // For simplicity, we just send. But we should check if we already have a pending hover for this pos?
+                // Let's just send it.
+                let params = json!({
+                    "textDocument": {
+                        "uri": self.doc_uri.clone()
+                    },
+                    "position": {
+                        "line": line,
+                        "character": col
+                    }
+                });
+                
+                if let Ok(id) = runtime.client.send_request("textDocument/hover", params) {
+                    self.pending_request = Some((id, LspRequestKind::Hover { index: idx, pos }));
+                }
+             }
+        }
+        
+        // Don't clear immediately if waiting for LSP, but maybe we should?
+        // If we moved, the old popup might be stale.
+        // Let's keep it until new one arrives or explicitly cleared?
+        // Actually, if we moved to a new place without local info, we should probably clear the old one until LSP replies.
+        if self.hover_popup.is_some() {
+             self.hover_popup = None;
+             cx.notify();
         }
     }
 
@@ -1782,78 +2113,117 @@ pub fn code_editor_canvas(
                             let cursor_y = layout.line_y(bounds, line);
 
                             let menu_x = cursor_x;
-                            let menu_y = cursor_y + line_height;
+                            let menu_y = cursor_y + line_height + px(4.0); // Add a little gap
 
                             let item_height = line_height;
-                            let menu_width = px(200.0);
-                            let menu_height = item_height * completion_items.len() as f32;
+                            let menu_width = px(250.0);
+                            
+                            // Calculate visible range
+                            let max_visible_items = 10;
+                            let total_items = completion_items.len();
+                            let visible_count = total_items.min(max_visible_items);
+                            let menu_height = item_height * visible_count as f32;
+                            
+                            let scroll_index = editor.read(cx).completion_scroll_offset as usize;
+                            let visible_items = &completion_items[scroll_index..(scroll_index + visible_count).min(total_items)];
 
                             let menu_bounds =
                                 Bounds::new(point(menu_x, menu_y), size(menu_width, menu_height));
 
+                            // Paint shadow
+                            CodeEditor::paint_soft_shadow(window, menu_bounds, px(4.0));
+
                             let mut menu_quad = fill(menu_bounds, rgb(0x252526));
                             menu_quad.border_widths = Edges::all(px(1.0));
                             menu_quad.border_color = rgb(0x454545).into();
+                            menu_quad.corner_radii = Corners::all(px(4.0));
                             window.paint_quad(menu_quad);
+                            
+                            // Clip content to menu bounds
+                            window.with_content_mask(Some(ContentMask { bounds: menu_bounds }), |window| {
+                                for (i, item) in visible_items.iter().enumerate() {
+                                    let global_index = scroll_index + i;
+                                    let item_y = menu_y + item_height * i as f32;
+                                    let item_bounds = Bounds::new(
+                                        point(menu_x, item_y),
+                                        size(menu_width, item_height),
+                                    );
 
-                            for (i, item) in completion_items.iter().enumerate() {
-                                let item_y = menu_y + item_height * i as f32;
-                                let item_bounds = Bounds::new(
-                                    point(menu_x, item_y),
-                                    size(menu_width, item_height),
-                                );
+                                    if global_index == completion_index {
+                                        window.paint_quad(fill(item_bounds, rgb(0x04395e)));
+                                    }
 
-                                if i == completion_index {
-                                    window.paint_quad(fill(item_bounds, rgb(0x04395e)));
-                                }
+                                    // Icon
+                                    let icon_text = item.kind.icon_text();
+                                    let icon_color = item.kind.color();
+                                    let icon_line = CodeEditor::shape_line(
+                                        window, icon_text, icon_color, font_size,
+                                    );
+                                    let icon_height = icon_line.ascent + icon_line.descent;
+                                    let icon_y = item_y + (item_height - icon_height) / 2.0;
+                                    icon_line
+                                        .paint(point(menu_x + px(6.0), icon_y), item_height, window, cx)
+                                        .ok();
 
-                                let _icon_bounds = Bounds::new(
-                                    point(menu_x + px(4.0), item_y),
-                                    size(px(20.0), item_height),
-                                );
-                                let icon_text = item.kind.icon_text();
-                                let icon_color = item.kind.color();
-                                let icon_line = CodeEditor::shape_line(
-                                    window, icon_text, icon_color, font_size,
-                                );
-                                let icon_height = icon_line.ascent + icon_line.descent;
-                                let icon_y = item_y + (item_height - icon_height) / 2.0;
-                                icon_line
-                                    .paint(point(menu_x + px(6.0), icon_y), item_height, window, cx)
-                                    .ok();
-
-                                let label_line = CodeEditor::shape_line(
-                                    window,
-                                    &item.label,
-                                    rgb(0xcccccc).into(),
-                                    font_size,
-                                );
-                                let label_height = label_line.ascent + label_line.descent;
-                                let label_y = item_y + (item_height - label_height) / 2.0;
-                                label_line
-                                    .paint(
-                                        point(menu_x + px(30.0), label_y),
-                                        item_height,
+                                    // Label
+                                    let label_line = CodeEditor::shape_line(
                                         window,
-                                        cx,
-                                    )
-                                    .ok();
-
-                                if !item.detail.is_empty() {
-                                    let detail_line = CodeEditor::shape_line(
-                                        window,
-                                        &item.detail,
-                                        rgb(0x808080).into(),
+                                        &item.label,
+                                        rgb(0xcccccc).into(),
                                         font_size,
                                     );
-                                    let detail_height = detail_line.ascent + detail_line.descent;
-                                    let detail_y = item_y + (item_height - detail_height) / 2.0;
-                                    let detail_x =
-                                        menu_x + menu_width - detail_line.width - px(8.0);
-                                    detail_line
-                                        .paint(point(detail_x, detail_y), item_height, window, cx)
+                                    let label_height = label_line.ascent + label_line.descent;
+                                    let label_y = item_y + (item_height - label_height) / 2.0;
+                                    label_line
+                                        .paint(
+                                            point(menu_x + px(30.0), label_y),
+                                            item_height,
+                                            window,
+                                            cx,
+                                        )
                                         .ok();
+
+                                    // Detail
+                                    if !item.detail.is_empty() {
+                                        let detail_line = CodeEditor::shape_line(
+                                            window,
+                                            &item.detail,
+                                            rgb(0x808080).into(),
+                                            font_size,
+                                        );
+                                        let detail_height = detail_line.ascent + detail_line.descent;
+                                        let detail_y = item_y + (item_height - detail_height) / 2.0;
+                                        let detail_x =
+                                            menu_x + menu_width - detail_line.width - px(8.0);
+                                        
+                                        // Only draw if it fits
+                                        if detail_x > menu_x + px(30.0) + label_line.width + px(10.0) {
+                                            detail_line
+                                                .paint(point(detail_x, detail_y), item_height, window, cx)
+                                                .ok();
+                                        }
+                                    }
                                 }
+                            });
+                            
+                            // Scrollbar for completion menu
+                            if total_items > max_visible_items {
+                                let scrollbar_width = px(4.0);
+                                let track_bounds = Bounds::new(
+                                    point(menu_bounds.right() - scrollbar_width, menu_bounds.top()),
+                                    size(scrollbar_width, menu_bounds.size.height),
+                                );
+                                
+                                let thumb_height = menu_bounds.size.height * (visible_count as f32 / total_items as f32);
+                                let thumb_y = menu_bounds.top() + (menu_bounds.size.height - thumb_height) * (scroll_index as f32 / (total_items - visible_count) as f32);
+                                
+                                let thumb_bounds = Bounds::new(
+                                    point(menu_bounds.right() - scrollbar_width, thumb_y),
+                                    size(scrollbar_width, thumb_height)
+                                );
+                                
+                                window.paint_quad(fill(track_bounds, rgba(0x00000000)));
+                                window.paint_quad(fill(thumb_bounds, rgba(0x80808080)));
                             }
                         }
 
@@ -1898,6 +2268,10 @@ pub fn code_editor_canvas(
                         .max(bounds.top() + px(4.0));
 
                     let popup_bounds = Bounds::new(point(x, y), size(popup_w, popup_h));
+                    
+                    // Paint shadow
+                    CodeEditor::paint_soft_shadow(window, popup_bounds, px(4.0));
+                    
                     let mut popup_quad = fill(popup_bounds, rgba(0x1e1e1ef0));
                     popup_quad.border_widths = Edges::all(px(1.0));
                     popup_quad.border_color = hover.color.rgba().into();

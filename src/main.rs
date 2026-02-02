@@ -1,12 +1,15 @@
 #![cfg_attr(all(not(test), not(debug_assertions)), windows_subsystem = "windows")]
 
+mod component;
 mod editor;
 pub mod lsp;
 
+use component::{
+    ComponentLibrary, InputBackspace, InputDelete, InputLeft, InputRight, InputSelectAll,
+};
 use editor::{
-    Backspace, CancelFind, CodeEditor, Copy, CtrlShiftTab, Cut, Delete, DeleteLine, Down, Enter,
-    Decoration, DecorationColor, FindNext, FindPrev, Left, Paste, Redo, Right, SelectAll, ShiftTab,
-    Tab, ToggleFind, Undo, Up,
+    Backspace, CodeEditor, Copy, CtrlShiftTab, Cut, Delete, DeleteLine, Down, Enter, Escape,
+    FindNext, FindPrev, Left, Paste, Redo, Right, SelectAll, ShiftTab, Tab, ToggleFind, Undo, Up,
 };
 use gpui::*;
 use log::*;
@@ -31,9 +34,13 @@ fn main() {
             KeyBinding::new("enter", Enter, Some("CodeEditor")),
             KeyBinding::new("tab", Tab, Some("CodeEditor")),
             KeyBinding::new("shift-tab", ShiftTab, Some("CodeEditor")),
-            KeyBinding::new("escape", CancelFind, Some("CodeEditor")),
+            KeyBinding::new("escape", Escape, Some("CodeEditor")),
             KeyBinding::new("f3", FindNext, Some("CodeEditor")),
             KeyBinding::new("shift-f3", FindPrev, Some("CodeEditor")),
+            KeyBinding::new("backspace", InputBackspace, Some("ComponentLibrary")),
+            KeyBinding::new("delete", InputDelete, Some("ComponentLibrary")),
+            KeyBinding::new("left", InputLeft, Some("ComponentLibrary")),
+            KeyBinding::new("right", InputRight, Some("ComponentLibrary")),
         ];
 
         // 3. 动态拼接并添加带修饰键的绑定
@@ -55,6 +62,11 @@ fn main() {
             KeyBinding::new(&format!("{}-shift-z", ctrl_cmd), Redo, Some("CodeEditor")),
             KeyBinding::new(&format!("{}-f", ctrl_cmd), ToggleFind, Some("CodeEditor")),
             KeyBinding::new(&format!("{}-a", ctrl_cmd), SelectAll, Some("CodeEditor")),
+            KeyBinding::new(
+                &format!("{}-a", ctrl_cmd),
+                InputSelectAll,
+                Some("ComponentLibrary"),
+            ),
         ]);
 
         // 4. 注册所有绑定
@@ -77,66 +89,14 @@ fn main() {
                         return;
                     }
 
-                    let sample = "@code\nint main() {\n    int x = 0;\n    return x;\n}\n@end\n\n类 启动类\n变量 name: 文本 = \"hello\"\n";
+                    let sample = "类 启动类\n{\n    方法 启动方法()\n    {\n        变量 list: 列表<文本> = 新建 列表<文本>()\n        list.\n    }\n}\n";
                     editor.set_content(sample.to_string(), cx);
-
-                    fn find_nth(haystack: &str, needle: &str, n: usize) -> Option<usize> {
-                        let mut idx = 0;
-                        let mut found = 0usize;
-                        while let Some(pos) = haystack[idx..].find(needle) {
-                            let abs = idx + pos;
-                            if found == n {
-                                return Some(abs);
-                            }
-                            found += 1;
-                            idx = abs + needle.len();
-                            if idx >= haystack.len() {
-                                break;
-                            }
-                        }
-                        None
-                    }
-
-                    let mut decorations = Vec::new();
-                    if let Some(start) = find_nth(sample, "int", 0) {
-                        decorations.push(Decoration {
-                            range: start..start + "int".len(),
-                            color: DecorationColor::Red,
-                            message: Some("错误示例：这里用红色波浪线".to_string()),
-                        });
-                    }
-                    if let Some(start) = find_nth(sample, "return", 0) {
-                        decorations.push(Decoration {
-                            range: start..start + "return".len(),
-                            color: DecorationColor::Yellow,
-                            message: Some("警告示例：这里用黄色波浪线".to_string()),
-                        });
-                    }
-                    if let Some(start) = find_nth(sample, "变量", 0) {
-                        decorations.push(Decoration {
-                            range: start..start + "变量".len(),
-                            color: DecorationColor::Gray,
-                            message: Some("提示示例：这里用灰色波浪线".to_string()),
-                        });
-                    }
-                    if let Some(start) = find_nth(sample, "启动类", 0) {
-                        decorations.push(Decoration {
-                            range: start..start + "启动类".len(),
-                            color: DecorationColor::Custom(0x64ff64cc),
-                            message: Some("自定义颜色示例：这里用 Custom 颜色".to_string()),
-                        });
-                    }
-                    if let Some(start) = find_nth(sample, "\"hello\"", 0) {
-                        decorations.push(Decoration {
-                            range: start..start + "\"hello\"".len(),
-                            color: DecorationColor::Custom(0x66b2ffff),
-                            message: Some("信息示例：悬浮会显示提示文本".to_string()),
-                        });
-                    }
-
-                    editor.set_decorations(decorations, cx);
                 });
-                cx.new(|_| StartWindow { editor })
+                let component_library = cx.new(ComponentLibrary::new);
+                cx.new(|_| StartWindow {
+                    editor,
+                    component_library,
+                })
             },
         );
     });
@@ -144,6 +104,7 @@ fn main() {
 
 struct StartWindow {
     editor: Entity<CodeEditor>,
+    component_library: Entity<ComponentLibrary>,
 }
 
 impl Render for StartWindow {
@@ -171,6 +132,7 @@ impl Render for StartWindow {
                             .window_control_area(WindowControlArea::Max),
                     ),
             )
+            .child(self.component_library.clone())
             .child(
                 div()
                     .flex_1()

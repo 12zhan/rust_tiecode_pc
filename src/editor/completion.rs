@@ -1,5 +1,6 @@
 use gpui::*;
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct CompletionItem {
     pub label: String,
@@ -7,6 +8,7 @@ pub struct CompletionItem {
     pub detail: String,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CompletionKind {
     Function,
@@ -17,6 +19,7 @@ pub enum CompletionKind {
 }
 
 impl CompletionKind {
+    #[allow(dead_code)]
     pub fn icon_text(&self) -> &'static str {
         match self {
             Self::Function => "F",
@@ -29,20 +32,11 @@ impl CompletionKind {
 
     pub fn color(&self) -> Hsla {
         match self {
-            Self::Function => rgb(0xdcb628).into(), // Yellow
-            Self::Variable => rgb(0xd02a8c).into(), // Magenta
-            Self::Class => rgb(0xaaaaaa).into(),    // Gray
-            Self::Keyword => rgb(0x569cd6).into(),  // Blue
-            Self::Text => rgb(0xcccccc).into(),     // Light Gray
+            Self::Function => rgb(0xfabd2f).into(), // Gruvbox Yellow
+            Self::Variable => rgb(0xd3869b).into(), // Gruvbox Purple
+            Self::Class => rgb(0x8ec07c).into(),    // Gruvbox Aqua
+            Self::Keyword => rgb(0xfb4934).into(),  // Gruvbox Red
+            Self::Text => rgb(0xebdbb2).into(),     // Gruvbox Foreground
         }
     }
 }
-
-pub const CPP_KEYWORDS: &[&str] = &[
-    "int", "char", "float", "double", "bool", "void", "long", "short", "signed", "unsigned",
-    "if", "else", "for", "while", "do", "switch", "case", "default", "break", "continue", "return", "goto",
-    "struct", "class", "enum", "union", "typedef", "typename", "template", "namespace", "using",
-    "public", "private", "protected", "virtual", "override", "static", "const", "inline", "friend",
-    "true", "false", "nullptr", "this", "new", "delete", "sizeof", "operator", "explicit", "noexcept",
-    "#include", "#define", "#ifdef", "#ifndef", "#endif", "#pragma"
-];

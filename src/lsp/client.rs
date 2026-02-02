@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{ChildStdin, Command, Stdio};
+use std::path::Path;
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{channel, Receiver};
 use std::thread;
 
 #[derive(Serialize)]
@@ -13,28 +15,37 @@ struct JsonRpcRequest {
     params: Value,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
-    pub id: Option<usize>,
+    pub id: Option<Value>,
     pub result: Option<Value>,
     pub error: Option<Value>,
-    pub method: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct JsonRpcNotification {
+    pub jsonrpc: String,
+    pub method: String,
     pub params: Option<Value>,
+}
+
+#[derive(Debug)]
+pub enum JsonRpcMessage {
+    Response(JsonRpcResponse),
+    Notification(JsonRpcNotification),
+    Unknown(Value),
 }
 
 pub struct LspClient {
     stdin: ChildStdin,
     next_id: AtomicUsize,
+    pub receiver: Receiver<JsonRpcMessage>,
 }
 
 impl LspClient {
-    pub fn new<F>(cmd: &str, args: &[&str], on_message: F) -> std::io::Result<Self>
-    where
-        F: Fn(JsonRpcResponse) + Send + 'static,
-    {
-        let mut child = Command::new(cmd)
-            .args(args)
+    pub fn stdio(path: &Path) -> std::io::Result<(Self, Child)> {
+        let mut child = Command::new(path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -44,6 +55,8 @@ impl LspClient {
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
 
+        let (tx, rx) = channel();
+
         thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             loop {
@@ -51,9 +64,13 @@ impl LspClient {
                 let mut content_length = 0;
 
                 while let Ok(n) = reader.read_line(&mut line) {
-                    if n == 0 { return; }
-                    if line == "\r\n" { break; }
-                    
+                    if n == 0 {
+                        return;
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+
                     if line.starts_with("Content-Length: ") {
                         if let Ok(len) = line["Content-Length: ".len()..].trim().parse::<usize>() {
                             content_length = len;
@@ -66,15 +83,31 @@ impl LspClient {
                     let mut buffer = vec![0u8; content_length];
                     if reader.read_exact(&mut buffer).is_ok() {
                         if let Ok(json_str) = String::from_utf8(buffer) {
-                            if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&json_str) {
-                                on_message(response);
+                            // Try to parse as Notification first (method present, no id)
+                            // Or Response (id present)
+                            // Or generic Value
+                            if let Ok(val) = serde_json::from_str::<Value>(&json_str) {
+                                let msg = if val.get("method").is_some() && val.get("id").is_none() {
+                                    if let Ok(notif) = serde_json::from_value(val.clone()) {
+                                        JsonRpcMessage::Notification(notif)
+                                    } else {
+                                        JsonRpcMessage::Unknown(val)
+                                    }
+                                } else {
+                                    if let Ok(resp) = serde_json::from_value(val.clone()) {
+                                        JsonRpcMessage::Response(resp)
+                                    } else {
+                                        JsonRpcMessage::Unknown(val)
+                                    }
+                                };
+                                let _ = tx.send(msg);
                             }
                         }
                     }
                 }
             }
         });
-        
+
         thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines() {
@@ -84,13 +117,17 @@ impl LspClient {
             }
         });
 
-        Ok(Self {
-            stdin,
-            next_id: AtomicUsize::new(1),
-        })
+        Ok((
+            Self {
+                stdin,
+                next_id: AtomicUsize::new(1),
+                receiver: rx,
+            },
+            child,
+        ))
     }
 
-    pub fn send_request(&mut self, method: &str, params: Value) -> usize {
+    pub fn send_request(&mut self, method: &str, params: Value) -> std::io::Result<usize> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -99,23 +136,24 @@ impl LspClient {
             params,
         };
 
-        if let Ok(json) = serde_json::to_string(&request) {
-            let content = format!("Content-Length: {}\r\n\r\n{}", json.len(), json);
-            let _ = self.stdin.write_all(content.as_bytes());
-        }
-        id
+        let json = serde_json::to_string(&request)?;
+        println!("jflsp -> request: {}", json);
+        let content = format!("Content-Length: {}\r\n\r\n{}", json.len(), json);
+        self.stdin.write_all(content.as_bytes())?;
+        Ok(id)
     }
-    
-    pub fn send_notification(&mut self, method: &str, params: Value) {
+
+    pub fn send_notification(&mut self, method: &str, params: Value) -> std::io::Result<()> {
         let request = serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,
             "params": params
         });
 
-        if let Ok(json) = serde_json::to_string(&request) {
-            let content = format!("Content-Length: {}\r\n\r\n{}", json.len(), json);
-            let _ = self.stdin.write_all(content.as_bytes());
-        }
+        let json = serde_json::to_string(&request)?;
+        println!("jflsp -> notification: {}", json);
+        let content = format!("Content-Length: {}\r\n\r\n{}", json.len(), json);
+        self.stdin.write_all(content.as_bytes())?;
+        Ok(())
     }
 }

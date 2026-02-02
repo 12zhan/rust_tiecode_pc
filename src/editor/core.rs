@@ -197,12 +197,15 @@ impl EditorCore {
     // Kept for compatibility/single selection operations if needed
     pub fn replace_range(&mut self, range: Range<usize>, text: &str) {
          self.history.begin_transaction();
-         self.replace_range_internal(range.clone(), text);
+         let len = self.content.len_bytes();
+         let start = range.start.min(len);
+         let end = range.end.min(len);
+         self.replace_range_internal(start..end, text);
          
          // Update selections?
          // If we use this method, we assume single selection or manual control.
          // Let's just update the primary selection to match behavior.
-         let new_pos = range.start + text.len();
+         let new_pos = start + text.len();
          self.selections = vec![Selection::new(new_pos, new_pos)];
          self.marked_range = None;
          
@@ -213,6 +216,7 @@ impl EditorCore {
         self.replace_selections(text);
     }
 
+    #[allow(dead_code)]
     pub fn delete_range(&mut self, range: Range<usize>) {
         self.replace_range(range, "");
     }

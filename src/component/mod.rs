@@ -1,4 +1,5 @@
 use gpui::*;
+pub mod file_tree;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 

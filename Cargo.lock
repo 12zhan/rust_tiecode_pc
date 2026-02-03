@@ -5322,6 +5322,7 @@ dependencies = [
 name = "tiecode"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bindgen 0.69.5",
  "cc",
  "cmake",

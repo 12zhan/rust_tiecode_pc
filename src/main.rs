@@ -5,20 +5,55 @@ mod editor;
 pub mod lsp;
 
 use component::{
-    ComponentLibrary, InputBackspace, InputDelete, InputLeft, InputRight, InputSelectAll,
+    file_tree::{FileTree, file_icon}, ComponentLibrary, InputBackspace, InputDelete, InputLeft, InputRight, InputSelectAll,
 };
 use editor::{
     Backspace, CodeEditor, Copy, CtrlShiftTab, Cut, Delete, DeleteLine, Down, Enter, Escape,
     FindNext, FindPrev, Left, Paste, Redo, Right, SelectAll, ShiftTab, Tab, ToggleFind, Undo, Up,
 };
+use anyhow::Result;
 use gpui::*;
 use log::*;
+use std::fs;
+use std::path::PathBuf;
+
+struct Assets {
+    base: PathBuf,
+}
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        fs::read(self.base.join(path))
+            .map(|data| Some(std::borrow::Cow::Owned(data)))
+            .map_err(|err| err.into())
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        fs::read_dir(self.base.join(path))
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| {
+                        entry
+                            .ok()
+                            .and_then(|entry| entry.file_name().into_string().ok())
+                            .map(SharedString::from)
+                    })
+                    .collect()
+            })
+            .map_err(|err| err.into())
+    }
+}
+
 #[allow(dead_code)]
 static APP_ID: &str = "d8b8e2b1-0c9b-4b7e-8b8a-0c9b4b7e8b8a";
 fn main() {
     env_logger::init();
 
-    Application::new().run(|context: &mut App| {
+    Application::new()
+        .with_assets(Assets {
+            base: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        })
+        .run(|context: &mut App| {
         info!("tiecode for desktop start success!");
 
         // 获取平台来确定ctrl还是cmd
@@ -93,9 +128,11 @@ fn main() {
                     editor.set_content(sample.to_string(), cx);
                 });
                 let component_library = cx.new(ComponentLibrary::new);
+                let file_tree = cx.new(|cx| FileTree::new(std::env::current_dir().unwrap_or(std::path::PathBuf::from(".")), cx));
                 cx.new(|_| StartWindow {
                     editor,
                     component_library,
+                    file_tree,
                 })
             },
         );
@@ -105,10 +142,16 @@ fn main() {
 struct StartWindow {
     editor: Entity<CodeEditor>,
     component_library: Entity<ComponentLibrary>,
+    file_tree: Entity<FileTree>,
 }
 
 impl Render for StartWindow {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let file_tree_view = self.file_tree.read(cx);
+        let is_dragging = file_tree_view.is_dragging();
+        let drag_source = file_tree_view.drag_source();
+        let mouse_position = file_tree_view.mouse_position();
+
         div()
             .bg(rgb(0xFFFFFFFF))
             .flex()
@@ -139,8 +182,49 @@ impl Render for StartWindow {
                     .flex()
                     .w_full()
                     .bg(rgb(0xff2d353b))
+                    .child(
+                        div()
+                            .w(px(250.0))
+                            .h_full()
+                            .border_r_1()
+                            .border_color(rgb(0xff3c474d))
+                            .bg(rgb(0xff252526))
+                            .child(self.file_tree.clone())
+                    )
                     .child(self.editor.clone()),
             )
             .child(div().w_full().h(px(30.0)).bg(rgb(0xff354246)))
+            .child(
+                if is_dragging {
+                    if let Some(path) = drag_source {
+                        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                        div()
+                            .absolute()
+                            .top(mouse_position.y)
+                            .left(mouse_position.x + px(10.0))
+                            .flex()
+                            .items_center()
+                            .bg(rgb(0x2d353b))
+                            .border_1()
+                            .border_color(rgb(0x454545))
+                            .rounded_md()
+                            .p(px(4.0))
+                            .opacity(0.8)
+                            .child(file_icon(&name))
+                            .child(
+                                div()
+                                    .ml(px(4.0))
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(0xffffff))
+                                    .child(name)
+                            )
+                            .into_any_element()
+                    } else {
+                        div().into_any_element()
+                    }
+                } else {
+                    div().into_any_element()
+                }
+            )
     }
 }

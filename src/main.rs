@@ -5,7 +5,7 @@ mod editor;
 pub mod lsp;
 
 use component::{
-    file_tree::{FileTree, file_icon}, ComponentLibrary, InputBackspace, InputDelete, InputLeft, InputRight, InputSelectAll,
+    file_tree::{FileTree, file_icon, FileTreeEvent}, ComponentLibrary, InputBackspace, InputDelete, InputLeft, InputRight, InputSelectAll,
 };
 use editor::{
     Backspace, CodeEditor, Copy, CtrlShiftTab, Cut, Delete, DeleteLine, Down, Enter, Escape,
@@ -129,10 +129,25 @@ fn main() {
                 });
                 let component_library = cx.new(ComponentLibrary::new);
                 let file_tree = cx.new(|cx| FileTree::new(std::env::current_dir().unwrap_or(std::path::PathBuf::from(".")), cx));
-                cx.new(|_| StartWindow {
-                    editor,
-                    component_library,
-                    file_tree,
+                cx.new(|cx| {
+                    let subscription = cx.subscribe(&file_tree, |this: &mut StartWindow, _emitter, event: &FileTreeEvent, cx| {
+                        match event {
+                            FileTreeEvent::OpenFile(path) => {
+                                if let Ok(content) = std::fs::read_to_string(path) {
+                                    this.editor.update(cx, |editor, cx| {
+                                        editor.set_content(content, cx);
+                                    });
+                                }
+                            }
+                        }
+                    });
+
+                    StartWindow {
+                        editor,
+                        component_library,
+                        file_tree,
+                        _subscriptions: vec![subscription],
+                    }
                 })
             },
         );
@@ -143,11 +158,13 @@ struct StartWindow {
     editor: Entity<CodeEditor>,
     component_library: Entity<ComponentLibrary>,
     file_tree: Entity<FileTree>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl Render for StartWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let file_tree_view = self.file_tree.read(cx);
+        let file_tree = self.file_tree.clone();
         let is_dragging = file_tree_view.is_dragging();
         let drag_source = file_tree_view.drag_source();
         let mouse_position = file_tree_view.mouse_position();
@@ -158,6 +175,16 @@ impl Render for StartWindow {
             .flex_col()
             .w_full()
             .h_full()
+            .on_drop(move |paths: &ExternalPaths, _, cx| {
+                if let Some(path) = paths.paths().first() {
+                     if path.is_dir() {
+                         println!("Dropping folder: {:?}", path);
+                         file_tree.update(cx, |tree, cx| {
+                             tree.set_root_path(path.clone(), cx);
+                         });
+                     }
+                }
+            })
             .child(
                 div()
                     .w_full()

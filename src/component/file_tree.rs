@@ -13,6 +13,10 @@ pub struct FileEntry {
     pub is_expanded: bool,
 }
 
+pub enum FileTreeEvent {
+    OpenFile(PathBuf),
+}
+
 pub struct FileTree {
     root_path: PathBuf,
     expanded_paths: HashSet<PathBuf>,
@@ -28,6 +32,8 @@ pub struct FileTree {
     selection_time: Option<Instant>,
     animating: bool,
 }
+
+impl EventEmitter<FileTreeEvent> for FileTree {}
 
 impl FileTree {
     pub fn new(root_path: PathBuf, cx: &mut Context<Self>) -> Self {
@@ -54,6 +60,13 @@ impl FileTree {
         self.visible_entries.clear();
         self.append_entries(&self.root_path.clone(), 0);
         self.list_state.reset(self.visible_entries.len());
+    }
+
+    pub fn set_root_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.root_path = path;
+        self.expanded_paths.clear();
+        self.refresh();
+        cx.notify();
     }
 
     fn append_entries(&mut self, path: &Path, depth: usize) {
@@ -152,9 +165,8 @@ impl FileTree {
         cx.notify();
     }
 
-    fn open_file(&self, path: &Path, _cx: &mut Context<Self>) {
-        println!("Opening file: {:?}", path);
-        // Here you would dispatch an action to open the file in the editor
+    fn open_file(&self, path: &Path, cx: &mut Context<Self>) {
+        cx.emit(FileTreeEvent::OpenFile(path.to_path_buf()));
     }
 
     fn is_descendant(&self, src: &Path, dst: &Path) -> bool {

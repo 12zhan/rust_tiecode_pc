@@ -6,27 +6,21 @@ use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
-use url::Url;
 
-use crate::lsp::{LspClient, JsonRpcMessage};
-use crate::lsp::jflsp::{
-    default_doc_uri, PublishDiagnosticsParams, 
-    TextDocumentPositionParams, TextDocumentIdentifier, Position,
-    Location, SignatureHelp as SignatureHelpResult, TextEdit,
-    DocumentFormattingParams, FormattingOptions, hover_content_as_string
-};
-use serde_json::{json, Value};
+// Value and Url removed
 
 pub mod completion;
 pub mod core;
 pub mod grammar;
 pub mod layout;
+pub mod lsp_integration;
 pub mod undo;
 
 #[cfg(test)]
 mod tests;
 
 use crate::editor::grammar::{CPP_GRAMMAR, JIESHENG_GRAMMAR};
+use crate::editor::lsp_integration::{LspManager, LspRequestKind, default_doc_uri};
 
 use self::completion::{CompletionItem, CompletionKind};
 use self::core::{EditorCore, Selection};
@@ -109,68 +103,6 @@ struct HoverPopup {
     color: DecorationColor,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum LspRequestKind {
-    #[allow(dead_code)]
-    Initialize,
-    Completion { index: usize },
-    Hover { index: usize, #[allow(dead_code)] pos: Point<Pixels> },
-    Definition { index: usize },
-    SignatureHelp { index: usize },
-    Formatting,
-}
-
-
-struct JflspRuntime {
-    client: LspClient,
-    _process: std::process::Child,
-}
-
-impl JflspRuntime {
-    fn new() -> Option<Self> {
-        let lsp_path = std::env::var("JFLSP_PATH").ok().or_else(|| {
-             let paths = [
-                 "jflsp.exe",
-                 "../jflsp.exe",
-                 "D:\\project\\jflsp\\target\\release\\jflsp.exe",
-                 "C:\\Users\\xiaoa\\Desktop\\tie_rust_gpui\\tiecode\\jflsp.exe"
-             ];
-             for p in paths {
-                 if std::path::Path::new(p).exists() {
-                     return Some(p.to_string());
-                 }
-             }
-             Some("D:\\project\\jflsp\\target\\release\\jflsp.exe".to_string())
-        })?;
-        
-        let path = PathBuf::from(lsp_path);
-        if !path.exists() {
-            println!("JFLSP not found at {:?}", path);
-            return None;
-        } else {
-            println!("Found JFLSP at {:?}", path);
-        }
-
-        match LspClient::stdio(&path) {
-            Ok((client, process)) => {
-                println!("JFLSP started successfully with PID: {}", process.id());
-                Some(Self { client, _process: process })
-            }
-            Err(e) => {
-                println!("Failed to start JFLSP: {}", e);
-                None
-            }
-        }
-    }
-
-    fn poll_message(&mut self) -> Option<JsonRpcMessage> {
-        match self.client.receiver.try_recv() {
-            Ok(msg) => Some(msg),
-            Err(_) => None,
-        }
-    }
-}
-
 pub enum CodeEditorEvent {
     OpenFile(PathBuf),
 }
@@ -192,12 +124,8 @@ pub struct CodeEditor {
     style_cache: HashMap<u32, Hsla>,
     decorations: Vec<Decoration>,
     hover_popup: Option<HoverPopup>,
-    jflsp_runtime: Option<JflspRuntime>,
-    pending_lsp_requests: HashMap<usize, LspRequestKind>,
+    pub lsp_manager: LspManager,
     completion_scroll_offset: f32,
-    lsp_version: i32,
-    doc_uri: String,
-    lsp_root_uri: String,
 }
 
 impl CodeEditor {
@@ -230,137 +158,16 @@ impl CodeEditor {
             style_cache: HashMap::new(),
             decorations: Vec::new(),
             hover_popup: None,
-            jflsp_runtime: JflspRuntime::new(),
-            pending_lsp_requests: HashMap::new(),
+            lsp_manager: LspManager::new(doc_uri),
             completion_scroll_offset: 0.0,
-            lsp_version: 1,
-            doc_uri,
-            lsp_root_uri: String::new(),
         };
 
         editor.init_lsp_and_spawn_loop(cx);
         editor
     }
 
-    fn init_lsp_and_spawn_loop(&mut self, cx: &mut Context<Self>) {
-         self.initialize_lsp_session();
-
-         cx.spawn(|editor: gpui::WeakEntity<CodeEditor>, cx: &mut gpui::AsyncApp| {
-             let mut cx = cx.clone();
-             async move {
-                 loop {
-                     cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
-                     let _ = editor.update(&mut cx, |editor, cx| {
-                         editor.process_lsp_messages(cx);
-                     });
-                 }
-             }
-         }).detach();
-    }
-
-    fn initialize_lsp_session(&mut self) {
-         if let Some(runtime) = &mut self.jflsp_runtime {
-             let mut jars = std::env::var("JFLSP_JARS")
-                 .ok()
-                 .map(|v| {
-                     v.split(';')
-                         .map(|s| s.trim())
-                         .filter(|s| !s.is_empty())
-                         .map(|s| s.to_string())
-                         .collect::<Vec<_>>()
-                 })
-                 .unwrap_or_default();
-             if let Ok(android_jar) = std::env::var("ANDROID_JAR") {
-                 let v = android_jar.trim();
-                 if !v.is_empty() {
-                     jars.push(v.to_string());
-                 }
-            } else {
-                let default_android_jar = r#"C:\Users\xiaoa\.tiecode\sdk\android-33-fix\android.jar"#;
-                let fallback_android_jar = r#"C:\Users\xiaoa\.tiecode\sdk\android-33-fix\android-stubs-src.jar"#;
-
-                if std::path::Path::new(default_android_jar).exists() {
-                    jars.push(default_android_jar.to_string());
-                } else if std::path::Path::new(fallback_android_jar).exists() {
-                    jars.push(fallback_android_jar.to_string());
-                }
-             }
-             let mut java_sources = std::env::var("JFLSP_JAVA_SOURCES")
-                 .ok()
-                 .map(|v| {
-                     v.split(';')
-                         .map(|s| s.trim())
-                         .filter(|s| !s.is_empty())
-                         .map(|s| s.to_string())
-                         .collect::<Vec<_>>()
-                 })
-                 .unwrap_or_default();
-
-             let default_android_src = r#"C:\Users\xiaoa\.tiecode\sdk\android-33-fix\android-stubs-src"#;
-             if std::path::Path::new(default_android_src).exists() {
-                 if !java_sources.contains(&default_android_src.to_string()) {
-                     java_sources.push(default_android_src.to_string());
-                 }
-             }
-
-             println!("LSP init options - jars: {:?}, sources: {:?}", jars, java_sources);
-             
-             let root_uri = if self.lsp_root_uri.is_empty() {
-                std::env::current_dir()
-                 .ok()
-                 .map(|p| default_doc_uri(&p))
-             } else {
-                Some(self.lsp_root_uri.clone())
-             };
-
-             let params = json!({
-                 "processId": std::process::id(),
-                 "rootUri": root_uri,
-                 "capabilities": {},
-                 "initializationOptions": {
-                     "jars": jars,
-                     "javaSources": java_sources
-                 }
-             });
-             
-             let _ = runtime.client.send_request("initialize", params);
-             let _ = runtime.client.send_notification("initialized", json!({}));
-             
-             let text = self.core.content.to_string();
-             let did_open_params = json!({
-                "textDocument": {
-                    "uri": self.doc_uri.clone(),
-                    "languageId": "java",
-                    "version": self.lsp_version,
-                    "text": text
-                }
-            });
-             let _ = runtime.client.send_notification("textDocument/didOpen", did_open_params);
-         }
-    }
-
-    fn detect_project_root(path: &std::path::Path) -> PathBuf {
-        for ancestor in path.ancestors() {
-            if ancestor.ends_with("源代码") {
-                if let Some(parent) = ancestor.parent() {
-                    return parent.to_path_buf();
-                }
-            }
-        }
-        
-        // Fallback: use file's directory if no better root found
-        if path.is_file() {
-            path.parent().unwrap_or(path).to_path_buf()
-        } else {
-            path.to_path_buf()
-        }
-    }
-
-    fn restart_lsp(&mut self, root_path: PathBuf) {
-        println!("Restarting LSP with new root: {:?}", root_path);
-        self.lsp_root_uri = default_doc_uri(&root_path);
-        self.jflsp_runtime = JflspRuntime::new(); // Drops old runtime, starts new one
-        self.initialize_lsp_session();
+    fn init_lsp_and_spawn_loop(&mut self, _cx: &mut Context<Self>) {
+         self.lsp_manager.initialize(&self.core.content.to_string());
     }
 
     fn paint_soft_shadow(window: &mut Window, bounds: Bounds<Pixels>, corner_radius: Pixels) {
@@ -409,47 +216,29 @@ impl CodeEditor {
     pub fn open_file(&mut self, path: PathBuf, content: String, cx: &mut Context<Self>) {
         let new_uri = default_doc_uri(&path);
         
-        if new_uri == self.doc_uri {
+        if new_uri == self.lsp_manager.doc_uri {
             self.set_content(content, cx);
             return;
         }
 
         // Detect project root and restart LSP if needed
-        let new_root_path = Self::detect_project_root(&path);
+        let new_root_path = LspManager::detect_project_root(&path);
         let new_root_uri = default_doc_uri(&new_root_path);
         
-        if new_root_uri != self.lsp_root_uri {
-            self.restart_lsp(new_root_path);
+        if new_root_uri != self.lsp_manager.root_uri {
+            self.lsp_manager.restart(new_root_path, &content);
         }
 
         // Clean up old document
-        let _ = self.sweetline_engine.remove_document(&self.doc_uri);
-        if let Some(runtime) = &mut self.jflsp_runtime {
-            let params = json!({
-                "textDocument": { "uri": self.doc_uri.clone() }
-            });
-            let _ = runtime.client.send_notification("textDocument/didClose", params);
-        }
-
-        self.doc_uri = new_uri;
-        self.lsp_version = 1;
+        let _ = self.sweetline_engine.remove_document(&self.lsp_manager.doc_uri);
+        
+        self.lsp_manager.doc_uri = new_uri;
+        self.lsp_manager.version = 1;
         self.core.content = Rope::from(content.clone());
         self.core.set_cursor(0);
         self.decorations.clear();
         self.hover_popup = None;
         self.sync_sweetline_document();
-
-        if let Some(runtime) = &mut self.jflsp_runtime {
-             let did_open_params = json!({
-                "textDocument": {
-                    "uri": self.doc_uri.clone(),
-                    "languageId": "java",
-                    "version": self.lsp_version,
-                    "text": content
-                }
-            });
-            let _ = runtime.client.send_notification("textDocument/didOpen", did_open_params);
-        }
 
         cx.notify();
     }
@@ -459,19 +248,7 @@ impl CodeEditor {
         self.sync_sweetline_document();
         self.core.set_cursor(0);
         
-        if let Some(runtime) = &mut self.jflsp_runtime {
-             self.lsp_version += 1;
-             let did_change_params = json!({
-                "textDocument": {
-                    "uri": self.doc_uri.clone(),
-                    "version": self.lsp_version
-                },
-                "contentChanges": [{
-                    "text": content
-                }]
-            });
-            let _ = runtime.client.send_notification("textDocument/didChange", did_change_params);
-        }
+        self.lsp_manager.notify_change(&content);
         
         cx.notify();
     }
@@ -498,20 +275,8 @@ impl CodeEditor {
     }
 
     fn notify_lsp_change(&mut self, _text: &str) {
-        if let Some(runtime) = &mut self.jflsp_runtime {
-            self.lsp_version += 1;
-            let content = self.core.content.to_string();
-            let did_change_params = json!({
-                "textDocument": {
-                    "uri": self.doc_uri.clone(),
-                    "version": self.lsp_version
-                },
-                "contentChanges": [{
-                    "text": content
-                }]
-            });
-            let _ = runtime.client.send_notification("textDocument/didChange", did_change_params);
-        }
+        let content = self.core.content.to_string();
+        self.lsp_manager.notify_change(&content);
     }
 
     #[allow(dead_code)]
@@ -523,248 +288,8 @@ impl CodeEditor {
         cx.notify();
     }
 
-    fn process_lsp_messages(&mut self, cx: &mut Context<Self>) {
-        let mut messages = Vec::new();
-        if let Some(runtime) = &mut self.jflsp_runtime {
-             while let Some(msg) = runtime.poll_message() {
-                 match &msg {
-                    JsonRpcMessage::Response(resp) => {
-                         if let Some(result) = &resp.result {
-                             println!("LSP Response [{}]: {}", 
-                                resp.id.as_ref().and_then(|v| v.as_u64()).unwrap_or(0), 
-                                serde_json::to_string_pretty(result).unwrap_or_default()
-                             );
-                         } else if let Some(error) = &resp.error {
-                             println!("LSP Error [{}]: {}", 
-                                resp.id.as_ref().and_then(|v| v.as_u64()).unwrap_or(0), 
-                                serde_json::to_string_pretty(error).unwrap_or_default()
-                             );
-                        } else {
-                             println!("LSP Response [{}]: null", 
-                                resp.id.as_ref().and_then(|v| v.as_u64()).unwrap_or(0)
-                             );
-                        }
-                    }
-                    JsonRpcMessage::Notification(notif) => {
-                        // Skip publishDiagnostics noise if empty
-                        if notif.method == "textDocument/publishDiagnostics" {
-                            // Only print if there are diagnostics
-                             if let Some(params) = &notif.params {
-                                 if let Ok(p) = serde_json::from_value::<PublishDiagnosticsParams>(params.clone()) {
-                                     if !p.diagnostics.is_empty() {
-                                         println!("LSP Diagnostics: {}", serde_json::to_string_pretty(&p).unwrap_or_default());
-                                     }
-                                 }
-                             }
-                        } else {
-                            println!("LSP Notification [{}]: {}", notif.method, 
-                                notif.params.as_ref().map(|p| serde_json::to_string_pretty(p).unwrap_or_default()).unwrap_or_default()
-                            );
-                        }
-                    }
-                    _ => println!("LSP Message: {:?}", msg),
-                 }
-                 messages.push(msg);
-             }
-        }
-
-        for msg in messages {
-            self.handle_lsp_message(msg, cx);
-        }
-    }
-
-    fn handle_lsp_message(&mut self, msg: JsonRpcMessage, cx: &mut Context<Self>) {
-        match msg {
-            JsonRpcMessage::Notification(notif) => {
-                if notif.method == "textDocument/publishDiagnostics" {
-                    if let Some(params) = notif.params {
-                        if let Ok(params) = serde_json::from_value::<PublishDiagnosticsParams>(params) {
-                            if params.uri == self.doc_uri {
-                                let mut decorations = Vec::new();
-                                for d in params.diagnostics {
-                                    let start_offset = self.lsp_point_to_offset(d.range.start.line as usize, d.range.start.character as usize);
-                                    let end_offset = self.lsp_point_to_offset(d.range.end.line as usize, d.range.end.character as usize);
-                                    
-                                    let color = match d.severity.unwrap_or(1) {
-                                        1 => DecorationColor::Red,
-                                        2 => DecorationColor::Yellow,
-                                        _ => DecorationColor::Gray,
-                                    };
-                                    
-                                    decorations.push(Decoration {
-                                        range: start_offset..end_offset,
-                                        color,
-                                        message: Some(d.message),
-                                    });
-                                }
-                                self.decorations = decorations;
-                                cx.notify();
-                            }
-                        }
-                    }
-                }
-            }
-            JsonRpcMessage::Response(resp) => {
-                if let Some(error) = &resp.error {
-                    println!("LSP Error: {:?}", error);
-                }
-                
-                let id = match &resp.id {
-                    Some(Value::Number(n)) => n.as_u64().map(|v| v as usize),
-                    _ => None,
-                };
-
-                if let Some(id) = id {
-                    if let Some(kind) = self.pending_lsp_requests.remove(&id) {
-                         if let Some(result) = &resp.result {
-                             match kind {
-                                 LspRequestKind::Completion { .. } => {
-                                     let mut items = Vec::new();
-                                     if let Some(arr) = result.as_array() {
-                                         for item in arr {
-                                             if let Some(label) = item["label"].as_str() {
-                                                 let detail = item["detail"].as_str().unwrap_or("").to_string();
-                                                 let kind_idx = item["kind"].as_u64().unwrap_or(1);
-                                                 let kind = match kind_idx {
-                                                     2 => CompletionKind::Function,
-                                                     3 => CompletionKind::Function, // Constructor
-                                                     6 => CompletionKind::Variable,
-                                                     7 => CompletionKind::Class,
-                                                     14 => CompletionKind::Keyword,
-                                                     _ => CompletionKind::Text,
-                                                 };
-                                                 
-                                                 items.push(CompletionItem {
-                                                     label: label.to_string(),
-                                                     kind,
-                                                     detail,
-                                                 });
-                                             }
-                                         }
-                                     } else if let Some(obj) = result.as_object() {
-                                         if let Some(arr) = obj.get("items").and_then(|i| i.as_array()) {
-                                             for item in arr {
-                                                 if let Some(label) = item["label"].as_str() {
-                                                     let detail = item["detail"].as_str().unwrap_or("").to_string();
-                                                     let kind_idx = item["kind"].as_u64().unwrap_or(1);
-                                                     let kind = match kind_idx {
-                                                         2 => CompletionKind::Function,
-                                                         3 => CompletionKind::Function,
-                                                         6 => CompletionKind::Variable,
-                                                         7 => CompletionKind::Class,
-                                                         14 => CompletionKind::Keyword,
-                                                         _ => CompletionKind::Text,
-                                                     };
-                                                     
-                                                     items.push(CompletionItem {
-                                                         label: label.to_string(),
-                                                         kind,
-                                                         detail,
-                                                     });
-                                                 }
-                                             }
-                                         }
-                                     }
-                                     
-                                     self.core.completion_items = items;
-                                    self.core.completion_active = !self.core.completion_items.is_empty();
-                                    self.core.completion_index = 0;
-                                    self.completion_scroll_offset = 0.0;
-                                    cx.notify();
-                                 }
-                                 LspRequestKind::Hover { pos, .. } => {
-                                     if let Some(contents) = result.get("contents") {
-                                         let text = hover_content_as_string(contents);
-                                         
-                                         if !text.is_empty() {
-                                             self.hover_popup = Some(HoverPopup {
-                                                 text,
-                                                 position: pos,
-                                                 color: DecorationColor::Gray,
-                                             });
-                                             cx.notify();
-                                         }
-                                     }
-                                 }
-                                 LspRequestKind::Definition { .. } => {
-                                     let mut location = None;
-                                     if let Ok(loc) = serde_json::from_value::<Location>(result.clone()) {
-                                         location = Some(loc);
-                                     } else if let Some(arr) = result.as_array() {
-                                         if let Some(first) = arr.first() {
-                                              if let Ok(loc) = serde_json::from_value::<Location>(first.clone()) {
-                                                  location = Some(loc);
-                                              }
-                                         }
-                                     }
-                                     
-                                     if let Some(loc) = location {
-                                         if loc.uri == self.doc_uri {
-                                            let start_offset = self.lsp_point_to_offset(loc.range.start.line as usize, loc.range.start.character as usize);
-                                            self.core.set_cursor(start_offset);
-                                            self.scroll_to_cursor(cx);
-                                            cx.notify();
-                                        } else {
-                                            if let Ok(url) = Url::parse(&loc.uri) {
-                                                if let Ok(path) = url.to_file_path() {
-                                                    cx.emit(CodeEditorEvent::OpenFile(path));
-                                                }
-                                            }
-                                        }
-                                     }
-                                 }
-                                 LspRequestKind::SignatureHelp { .. } => {
-                                     if let Ok(help) = serde_json::from_value::<SignatureHelpResult>(result.clone()) {
-                                         if !help.signatures.is_empty() {
-                                             let active_sig = help.active_signature.unwrap_or(0) as usize;
-                                             if let Some(sig) = help.signatures.get(active_sig) {
-                                                 let mut text = sig.label.clone();
-                                                 if let Some(doc) = &sig.documentation {
-                                                      text.push_str("\n\n");
-                                                      text.push_str(&hover_content_as_string(doc));
-                                                 }
-                                                 
-                                                 // Show near cursor
-                                                 let index = self.core.primary_selection().head;
-                                                 let pos = self.point_for_index(index);
-                                                 self.hover_popup = Some(HoverPopup {
-                                                     text,
-                                                     position: pos,
-                                                     color: DecorationColor::Gray,
-                                                 });
-                                                 cx.notify();
-                                             }
-                                         }
-                                     }
-                                 }
-                                 LspRequestKind::Formatting => {
-                                     let mut edits = Vec::new();
-                                     if let Ok(edit_list) = serde_json::from_value::<Vec<TextEdit>>(result.clone()) {
-                                         for edit in edit_list {
-                                             let start_offset = self.lsp_point_to_offset(edit.range.start.line as usize, edit.range.start.character as usize);
-                                             let end_offset = self.lsp_point_to_offset(edit.range.end.line as usize, edit.range.end.character as usize);
-                                             edits.push((start_offset..end_offset, edit.new_text));
-                                         }
-                                     } else if let Ok(edit) = serde_json::from_value::<TextEdit>(result.clone()) {
-                                         let start_offset = self.lsp_point_to_offset(edit.range.start.line as usize, edit.range.start.character as usize);
-                                         let end_offset = self.lsp_point_to_offset(edit.range.end.line as usize, edit.range.end.character as usize);
-                                         edits.push((start_offset..end_offset, edit.new_text));
-                                     }
-                                     
-                                     if !edits.is_empty() {
-                                         self.core.apply_edits(edits);
-                                         self.sync_sweetline_document();
-                                         cx.notify();
-                                     }
-                                 }
-                                 _ => {}
-                             }
-                         }
-                    }
-                }
-            }
-            _ => {}
-        }
+    fn process_lsp_messages(&mut self, _cx: &mut Context<Self>) {
+        // LSP functionality removed
     }
 
     fn scroll_to_cursor(&mut self, cx: &mut Context<Self>) {
@@ -887,49 +412,7 @@ impl CodeEditor {
             }
             // --- End C++ Keyword Completion ---
 
-            let (line, col) = self.lsp_position_for_index(cursor);
-            let params = json!({
-                "textDocument": {
-                    "uri": self.doc_uri.clone()
-                },
-                "position": {
-                    "line": line,
-                    "character": col
-                }
-            });
-            /*
-            // Temporarily disabled LSP completion to favor fixed C++ keywords
-            if let Some(runtime) = &mut self.jflsp_runtime {
-                match runtime.client.send_request("textDocument/completion", params) {
-                    Ok(id) => {
-                        println!("Sent completion request id={}", id);
-                        self.pending_lsp_requests.insert(id, LspRequestKind::Completion { index: cursor });
-                    },
-                    Err(e) => {
-                        println!("Failed to send completion request: {}", e);
-                    }
-                }
-            } else {
-            // Fallback when JFLSP is missing: Show warning if triggered by '.'
-                if cursor > 0 {
-                    let prev_char_idx = self.core.content.byte_to_char(cursor) - 1;
-                    let prev_char = self.core.content.char(prev_char_idx);
-                    if prev_char == '.' {
-                        self.core.completion_items = vec![
-                            CompletionItem {
-                                label: "JFLSP Missing".to_string(),
-                                kind: CompletionKind::Text,
-                                detail: "jflsp.exe not found".to_string(),
-                            }
-                        ];
-                        self.core.completion_active = true;
-                        self.core.completion_index = 0;
-                        self.completion_scroll_offset = 0.0;
-                        cx.notify();
-                    }
-                }
-            }
-            */
+// JFLSP integration removed
         }
     }
 
@@ -1132,64 +615,15 @@ impl CodeEditor {
     fn cancel_find(&mut self, _: &CancelFind, _: &mut Window, _: &mut Context<Self>) {}
 
     fn go_to_definition(&mut self, _: &GoToDefinition, _: &mut Window, _cx: &mut Context<Self>) {
-        let index = self.core.primary_selection().head;
-        let (line, col) = self.lsp_position_for_index(index);
-        let uri = self.doc_uri.clone();
-
-        if let Some(runtime) = &mut self.jflsp_runtime {
-            let params = TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier {
-                    uri,
-                },
-                position: Position {
-                    line: line as u32,
-                    character: col as u32,
-                },
-            };
-            if let Ok(id) = runtime.client.send_request("textDocument/definition", serde_json::to_value(params).unwrap()) {
-                self.pending_lsp_requests.insert(id, LspRequestKind::Definition { index });
-            }
-        }
+        // LSP functionality removed
     }
 
     fn signature_help(&mut self, _: &SignatureHelp, _: &mut Window, _cx: &mut Context<Self>) {
-        let index = self.core.primary_selection().head;
-        let (line, col) = self.lsp_position_for_index(index);
-        let uri = self.doc_uri.clone();
-
-        if let Some(runtime) = &mut self.jflsp_runtime {
-            let params = TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier {
-                    uri,
-                },
-                position: Position {
-                    line: line as u32,
-                    character: col as u32,
-                },
-            };
-            if let Ok(id) = runtime.client.send_request("textDocument/signatureHelp", serde_json::to_value(params).unwrap()) {
-                self.pending_lsp_requests.insert(id, LspRequestKind::SignatureHelp { index });
-            }
-        }
+        // LSP functionality removed
     }
 
     fn format_document(&mut self, _: &FormatDocument, _: &mut Window, _cx: &mut Context<Self>) {
-        let uri = self.doc_uri.clone();
-        if let Some(runtime) = &mut self.jflsp_runtime {
-            let params = DocumentFormattingParams {
-                text_document: TextDocumentIdentifier {
-                    uri,
-                },
-                options: FormattingOptions {
-                    tab_size: 4,
-                    insert_spaces: true,
-                    properties: HashMap::new(),
-                },
-            };
-            if let Ok(id) = runtime.client.send_request("textDocument/formatting", serde_json::to_value(params).unwrap()) {
-                self.pending_lsp_requests.insert(id, LspRequestKind::Formatting);
-            }
-        }
+        // LSP functionality removed
     }
 
     fn escape(&mut self, _: &Escape, _: &mut Window, cx: &mut Context<Self>) {
@@ -1529,11 +963,11 @@ impl CodeEditor {
     fn sync_sweetline_document(&mut self) {
         let text = self.core.content.to_string();
 
-        let _ = self.sweetline_engine.remove_document(&self.doc_uri);
+        let _ = self.sweetline_engine.remove_document(&self.lsp_manager.doc_uri);
         self.sweetline_analyzer = None;
         self.sweetline_document = None;
 
-        let doc = Document::new(&self.doc_uri, &text);
+        let doc = Document::new(&self.lsp_manager.doc_uri, &text);
         let analyzer = self.sweetline_engine.load_document(&doc);
 
         self.sweetline_document = Some(doc);
@@ -2104,35 +1538,21 @@ impl CodeEditor {
         
         // If no local decoration, request from LSP
         if let Some(idx) = index {
+            /*
             let (line, col) = self.lsp_position_for_index(idx);
             
             // Debounce/Check duplicate: If we already requested hover for this position recently, skip
             // We use a simplified check here. In a robust impl, we'd want true debouncing.
-            let already_pending = self.pending_lsp_requests.values().any(|k| {
+            let already_pending = self.lsp_manager.pending_requests.values().any(|k| {
                  if let LspRequestKind::Hover { index, .. } = k {
-                     *index == idx
+                     index == &idx
                  } else {
                      false
                  }
             });
+            */
 
-            if !already_pending {
-                if let Some(runtime) = &mut self.jflsp_runtime {
-                    let params = json!({
-                        "textDocument": {
-                            "uri": self.doc_uri.clone()
-                        },
-                        "position": {
-                            "line": line,
-                            "character": col
-                        }
-                    });
-                    
-                    if let Ok(id) = runtime.client.send_request("textDocument/hover", params) {
-                        self.pending_lsp_requests.insert(id, LspRequestKind::Hover { index: idx, pos });
-                    }
-                }
-            }
+// LSP hover request removed
         }
         
         // Don't clear immediately if waiting for LSP, but maybe we should?

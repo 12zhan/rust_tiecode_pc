@@ -1,7 +1,6 @@
 #![allow(dead_code, unused_imports, unused_macros)]
 pub mod client;
 pub use client::{LspClient, JsonRpcMessage};
-pub mod jflsp;
 pub mod tiec;
 
 use std::ffi::c_void;

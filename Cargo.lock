@@ -5339,6 +5339,7 @@ dependencies = [
  "serde_repr",
  "smallvec",
  "thiserror 1.0.69",
+ "url",
  "winres",
 ]
 

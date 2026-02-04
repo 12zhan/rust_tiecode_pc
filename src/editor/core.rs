@@ -108,7 +108,20 @@ impl EditorCore {
         self.selections = merged;
     }
 
+    pub fn apply_edits(&mut self, mut edits: Vec<(Range<usize>, String)>) {
+        self.history.begin_transaction();
+        // Sort descending by start to avoid offset issues
+        edits.sort_by(|a, b| b.0.start.cmp(&a.0.start));
+        
+        for (range, text) in edits {
+            self.replace_range_internal(range, &text);
+        }
+        self.history.end_transaction();
+        self.marked_range = None;
+    }
+
     pub fn replace_selections(&mut self, text: &str) {
+        self.merge_selections();
         self.history.begin_transaction();
         
         // Process from bottom to top to preserve indices of earlier selections

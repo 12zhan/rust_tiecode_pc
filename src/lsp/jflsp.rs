@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
+use url::Url;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -98,18 +99,17 @@ pub struct CompletionList {
 pub struct CompletionItem {
     pub label: String,
     #[serde(default)]
-    pub kind: Option<u32>,
+    pub kind: Option<i32>,
     #[serde(default)]
     pub detail: Option<String>,
     #[serde(default)]
+    pub documentation: Option<Value>,
+    #[serde(default)]
     pub insert_text: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum CompletionResult {
-    List(CompletionList),
-    Items(Vec<CompletionItem>),
+    #[serde(default)]
+    pub sort_text: Option<String>,
+    #[serde(default)]
+    pub filter_text: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -118,6 +118,20 @@ pub struct Hover {
     pub contents: Value,
     #[serde(default)]
     pub range: Option<Range>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Range {
+    pub start: Position,
+    pub end: Position,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Position {
+    pub line: u32,
+    pub character: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -133,72 +147,113 @@ pub struct PublishDiagnosticsParams {
 pub struct Diagnostic {
     pub range: Range,
     #[serde(default)]
-    pub severity: Option<u32>,
+    pub severity: Option<i32>,
     #[serde(default)]
-    pub code: Option<Value>,
+    pub code: Option<Value>, // string or number
     #[serde(default)]
     pub source: Option<String>,
+    pub message: String,
+    #[serde(default)]
+    pub related_information: Option<Vec<DiagnosticRelatedInformation>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticRelatedInformation {
+    pub location: Location,
     pub message: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Range {
-    pub start: Position,
-    pub end: Position,
+#[serde(rename_all = "camelCase")]
+pub struct Location {
+    pub uri: String,
+    pub range: Range,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Position {
-    pub line: u32,
-    pub character: u32,
+#[serde(rename_all = "camelCase")]
+pub struct SignatureHelp {
+    pub signatures: Vec<SignatureInformation>,
+    #[serde(default)]
+    pub active_signature: Option<u32>,
+    #[serde(default)]
+    pub active_parameter: Option<u32>,
 }
 
-pub fn file_uri_for_path(path: &Path) -> String {
-    let s = path.display().to_string().replace('\\', "/");
-    if s.len() >= 2 && s.as_bytes()[1] == b':' {
-        format!("file:///{}", s)
-    } else if s.starts_with('/') {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignatureInformation {
+    pub label: String,
+    #[serde(default)]
+    pub documentation: Option<Value>, // string or MarkupContent
+    #[serde(default)]
+    pub parameters: Option<Vec<ParameterInformation>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParameterInformation {
+    pub label: Value, // string or [u32; 2]
+    #[serde(default)]
+    pub documentation: Option<Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextEdit {
+    pub range: Range,
+    pub new_text: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentFormattingParams {
+    pub text_document: TextDocumentIdentifier,
+    pub options: FormattingOptions,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormattingOptions {
+    pub tab_size: u32,
+    pub insert_spaces: bool,
+    #[serde(flatten)]
+    pub properties: HashMap<String, Value>,
+}
+
+pub fn default_doc_uri(path: &Path) -> String {
+    if let Ok(url) = Url::from_file_path(path) {
+        return url.to_string();
+    }
+    // Fallback if from_file_path fails (e.g. relative path)
+    let s = path.to_string_lossy().replace('\\', "/");
+    if s.starts_with('/') {
         format!("file://{}", s)
     } else {
         format!("file:///{}", s)
     }
 }
 
-pub fn default_root_uri() -> Option<String> {
-    std::env::current_dir()
-        .ok()
-        .map(|p| file_uri_for_path(&p))
-}
-
-pub fn default_doc_uri() -> String {
-    "file:///virtual/untitled.t".to_string()
-}
-
-pub fn position_to_global_utf16(
-    line_start_utf16: usize,
-    character_utf16: u32,
-    len_utf16: usize,
-) -> usize {
-    (line_start_utf16 + character_utf16 as usize).min(len_utf16)
-}
-
-pub fn flatten_hover_contents(contents: &Value) -> String {
-    if let Some(s) = contents.as_str() {
+pub fn hover_content_as_string(content: &Value) -> String {
+    if let Some(s) = content.as_str() {
         return s.to_string();
     }
-    if let Some(obj) = contents.as_object() {
-        if let Some(v) = obj.get("value").and_then(|v| v.as_str()) {
-            return v.to_string();
-        }
-        if let Some(v) = obj.get("contents") {
-            return flatten_hover_contents(v);
+    if let Some(obj) = content.as_object() {
+        if let Some(val) = obj.get("value") {
+            if let Some(s) = val.as_str() {
+                return s.to_string();
+            }
         }
     }
-    if let Some(arr) = contents.as_array() {
-        let parts: Vec<String> = arr.iter().map(flatten_hover_contents).collect();
-        return parts.join("\n");
+    if let Some(arr) = content.as_array() {
+        let mut parts = Vec::new();
+        for item in arr {
+             parts.push(hover_content_as_string(item));
+        }
+        return parts.join("\n\n");
     }
-    contents.to_string()
+    content.to_string()
 }
 
 pub fn diagnostic_display_message(d: &Diagnostic) -> String {

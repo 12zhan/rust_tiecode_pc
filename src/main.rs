@@ -8,8 +8,8 @@ use component::{
     file_tree::{FileTree, file_icon, FileTreeEvent}, ComponentLibrary, InputBackspace, InputDelete, InputLeft, InputRight, InputSelectAll,
 };
 use editor::{
-    Backspace, CodeEditor, Copy, CtrlShiftTab, Cut, Delete, DeleteLine, Down, Enter, Escape,
-    FindNext, FindPrev, Left, Paste, Redo, Right, SelectAll, ShiftTab, Tab, ToggleFind, Undo, Up,
+    Backspace, CodeEditor, CodeEditorEvent, Copy, CtrlShiftTab, Cut, Delete, DeleteLine, Down, Enter, Escape,
+    FindNext, FindPrev, GoToDefinition, FormatDocument, SignatureHelp, Left, Paste, Redo, Right, SelectAll, ShiftTab, Tab, ToggleFind, Undo, Up,
 };
 use anyhow::Result;
 use gpui::*;
@@ -72,6 +72,9 @@ fn main() {
             KeyBinding::new("escape", Escape, Some("CodeEditor")),
             KeyBinding::new("f3", FindNext, Some("CodeEditor")),
             KeyBinding::new("shift-f3", FindPrev, Some("CodeEditor")),
+            KeyBinding::new("f12", GoToDefinition, Some("CodeEditor")),
+            KeyBinding::new(&format!("{}-shift-space", ctrl_cmd), SignatureHelp, Some("CodeEditor")),
+            KeyBinding::new("shift-alt-f", FormatDocument, Some("CodeEditor")),
             KeyBinding::new("backspace", InputBackspace, Some("ComponentLibrary")),
             KeyBinding::new("delete", InputDelete, Some("ComponentLibrary")),
             KeyBinding::new("left", InputLeft, Some("ComponentLibrary")),
@@ -135,7 +138,19 @@ fn main() {
                             FileTreeEvent::OpenFile(path) => {
                                 if let Ok(content) = std::fs::read_to_string(path) {
                                     this.editor.update(cx, |editor, cx| {
-                                        editor.set_content(content, cx);
+                                        editor.open_file(path.clone(), content, cx);
+                                    });
+                                }
+                            }
+                        }
+                    });
+
+                    let editor_subscription = cx.subscribe(&editor, |this: &mut StartWindow, _emitter, event: &CodeEditorEvent, cx| {
+                        match event {
+                            CodeEditorEvent::OpenFile(path) => {
+                                if let Ok(content) = std::fs::read_to_string(path) {
+                                    this.editor.update(cx, |editor, cx| {
+                                        editor.open_file(path.clone(), content, cx);
                                     });
                                 }
                             }
@@ -146,7 +161,7 @@ fn main() {
                         editor,
                         component_library,
                         file_tree,
-                        _subscriptions: vec![subscription],
+                        _subscriptions: vec![subscription, editor_subscription],
                     }
                 })
             },

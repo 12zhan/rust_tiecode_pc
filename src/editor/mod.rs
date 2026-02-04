@@ -6,9 +6,15 @@ use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
+use url::Url;
 
 use crate::lsp::{LspClient, JsonRpcMessage};
-use crate::lsp::jflsp::default_doc_uri;
+use crate::lsp::jflsp::{
+    default_doc_uri, PublishDiagnosticsParams, 
+    TextDocumentPositionParams, TextDocumentIdentifier, Position,
+    Location, SignatureHelp as SignatureHelpResult, TextEdit,
+    DocumentFormattingParams, FormattingOptions, hover_content_as_string
+};
 use serde_json::{json, Value};
 
 pub mod completion;
@@ -51,7 +57,10 @@ actions!(
         FindNext,
         FindPrev,
         CancelFind,
-        Escape
+        Escape,
+        GoToDefinition,
+        SignatureHelp,
+        FormatDocument
     ]
 );
 
@@ -106,6 +115,9 @@ enum LspRequestKind {
     Initialize,
     Completion { index: usize },
     Hover { index: usize, #[allow(dead_code)] pos: Point<Pixels> },
+    Definition { index: usize },
+    SignatureHelp { index: usize },
+    Formatting,
 }
 
 
@@ -135,11 +147,13 @@ impl JflspRuntime {
         if !path.exists() {
             println!("JFLSP not found at {:?}", path);
             return None;
+        } else {
+            println!("Found JFLSP at {:?}", path);
         }
 
         match LspClient::stdio(&path) {
             Ok((client, process)) => {
-                println!("JFLSP started");
+                println!("JFLSP started successfully with PID: {}", process.id());
                 Some(Self { client, _process: process })
             }
             Err(e) => {
@@ -157,6 +171,12 @@ impl JflspRuntime {
     }
 }
 
+pub enum CodeEditorEvent {
+    OpenFile(PathBuf),
+}
+
+impl EventEmitter<CodeEditorEvent> for CodeEditor {}
+
 pub struct CodeEditor {
     pub focus_handle: FocusHandle,
     pub core: EditorCore,
@@ -173,10 +193,11 @@ pub struct CodeEditor {
     decorations: Vec<Decoration>,
     hover_popup: Option<HoverPopup>,
     jflsp_runtime: Option<JflspRuntime>,
-    pending_request: Option<(usize, LspRequestKind)>,
+    pending_lsp_requests: HashMap<usize, LspRequestKind>,
     completion_scroll_offset: f32,
     lsp_version: i32,
     doc_uri: String,
+    lsp_root_uri: String,
 }
 
 impl CodeEditor {
@@ -189,7 +210,8 @@ impl CodeEditor {
             .compile_json(JIESHENG_GRAMMAR)
             .expect("Failed to compile 结绳 grammar");
 
-        let doc_uri = default_doc_uri();
+        let default_path = std::env::current_dir().unwrap_or_default().join("test.t");
+        let doc_uri = default_doc_uri(&default_path);
         let doc = Document::new(&doc_uri, "");
         let analyzer = engine.load_document(&doc);
 
@@ -209,17 +231,34 @@ impl CodeEditor {
             decorations: Vec::new(),
             hover_popup: None,
             jflsp_runtime: JflspRuntime::new(),
-            pending_request: None,
+            pending_lsp_requests: HashMap::new(),
             completion_scroll_offset: 0.0,
             lsp_version: 1,
             doc_uri,
+            lsp_root_uri: String::new(),
         };
 
-        editor.init_lsp(cx);
+        editor.init_lsp_and_spawn_loop(cx);
         editor
     }
 
-    fn init_lsp(&mut self, cx: &mut Context<Self>) {
+    fn init_lsp_and_spawn_loop(&mut self, cx: &mut Context<Self>) {
+         self.initialize_lsp_session();
+
+         cx.spawn(|editor: gpui::WeakEntity<CodeEditor>, cx: &mut gpui::AsyncApp| {
+             let mut cx = cx.clone();
+             async move {
+                 loop {
+                     cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
+                     let _ = editor.update(&mut cx, |editor, cx| {
+                         editor.process_lsp_messages(cx);
+                     });
+                 }
+             }
+         }).detach();
+    }
+
+    fn initialize_lsp_session(&mut self) {
          if let Some(runtime) = &mut self.jflsp_runtime {
              let mut jars = std::env::var("JFLSP_JARS")
                  .ok()
@@ -238,11 +277,15 @@ impl CodeEditor {
                  }
             } else {
                 let default_android_jar = r#"C:\Users\xiaoa\.tiecode\sdk\android-33-fix\android.jar"#;
+                let fallback_android_jar = r#"C:\Users\xiaoa\.tiecode\sdk\android-33-fix\android-stubs-src.jar"#;
+
                 if std::path::Path::new(default_android_jar).exists() {
                     jars.push(default_android_jar.to_string());
+                } else if std::path::Path::new(fallback_android_jar).exists() {
+                    jars.push(fallback_android_jar.to_string());
                 }
              }
-             let java_sources = std::env::var("JFLSP_JAVA_SOURCES")
+             let mut java_sources = std::env::var("JFLSP_JAVA_SOURCES")
                  .ok()
                  .map(|v| {
                      v.split(';')
@@ -252,9 +295,27 @@ impl CodeEditor {
                          .collect::<Vec<_>>()
                  })
                  .unwrap_or_default();
+
+             let default_android_src = r#"C:\Users\xiaoa\.tiecode\sdk\android-33-fix\android-stubs-src"#;
+             if std::path::Path::new(default_android_src).exists() {
+                 if !java_sources.contains(&default_android_src.to_string()) {
+                     java_sources.push(default_android_src.to_string());
+                 }
+             }
+
+             println!("LSP init options - jars: {:?}, sources: {:?}", jars, java_sources);
+             
+             let root_uri = if self.lsp_root_uri.is_empty() {
+                std::env::current_dir()
+                 .ok()
+                 .map(|p| default_doc_uri(&p))
+             } else {
+                Some(self.lsp_root_uri.clone())
+             };
+
              let params = json!({
                  "processId": std::process::id(),
-                 "rootUri": null,
+                 "rootUri": root_uri,
                  "capabilities": {},
                  "initializationOptions": {
                      "jars": jars,
@@ -265,29 +326,41 @@ impl CodeEditor {
              let _ = runtime.client.send_request("initialize", params);
              let _ = runtime.client.send_notification("initialized", json!({}));
              
-             let text = "";
+             let text = self.core.content.to_string();
              let did_open_params = json!({
-                 "textDocument": {
-                     "uri": self.doc_uri.clone(),
-                     "languageId": "tiecode",
-                     "version": self.lsp_version,
-                     "text": text
-                 }
-             });
+                "textDocument": {
+                    "uri": self.doc_uri.clone(),
+                    "languageId": "java",
+                    "version": self.lsp_version,
+                    "text": text
+                }
+            });
              let _ = runtime.client.send_notification("textDocument/didOpen", did_open_params);
          }
+    }
 
-         cx.spawn(|editor: gpui::WeakEntity<CodeEditor>, cx: &mut gpui::AsyncApp| {
-             let mut cx = cx.clone();
-             async move {
-                 loop {
-                     cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
-                     let _ = editor.update(&mut cx, |editor, cx| {
-                         editor.process_lsp_messages(cx);
-                     });
-                 }
-             }
-         }).detach();
+    fn detect_project_root(path: &std::path::Path) -> PathBuf {
+        for ancestor in path.ancestors() {
+            if ancestor.ends_with("源代码") {
+                if let Some(parent) = ancestor.parent() {
+                    return parent.to_path_buf();
+                }
+            }
+        }
+        
+        // Fallback: use file's directory if no better root found
+        if path.is_file() {
+            path.parent().unwrap_or(path).to_path_buf()
+        } else {
+            path.to_path_buf()
+        }
+    }
+
+    fn restart_lsp(&mut self, root_path: PathBuf) {
+        println!("Restarting LSP with new root: {:?}", root_path);
+        self.lsp_root_uri = default_doc_uri(&root_path);
+        self.jflsp_runtime = JflspRuntime::new(); // Drops old runtime, starts new one
+        self.initialize_lsp_session();
     }
 
     fn paint_soft_shadow(window: &mut Window, bounds: Bounds<Pixels>, corner_radius: Pixels) {
@@ -330,6 +403,54 @@ impl CodeEditor {
     pub fn clear_decorations(&mut self, cx: &mut Context<Self>) {
         self.decorations.clear();
         self.hover_popup = None;
+        cx.notify();
+    }
+
+    pub fn open_file(&mut self, path: PathBuf, content: String, cx: &mut Context<Self>) {
+        let new_uri = default_doc_uri(&path);
+        
+        if new_uri == self.doc_uri {
+            self.set_content(content, cx);
+            return;
+        }
+
+        // Detect project root and restart LSP if needed
+        let new_root_path = Self::detect_project_root(&path);
+        let new_root_uri = default_doc_uri(&new_root_path);
+        
+        if new_root_uri != self.lsp_root_uri {
+            self.restart_lsp(new_root_path);
+        }
+
+        // Clean up old document
+        let _ = self.sweetline_engine.remove_document(&self.doc_uri);
+        if let Some(runtime) = &mut self.jflsp_runtime {
+            let params = json!({
+                "textDocument": { "uri": self.doc_uri.clone() }
+            });
+            let _ = runtime.client.send_notification("textDocument/didClose", params);
+        }
+
+        self.doc_uri = new_uri;
+        self.lsp_version = 1;
+        self.core.content = Rope::from(content.clone());
+        self.core.set_cursor(0);
+        self.decorations.clear();
+        self.hover_popup = None;
+        self.sync_sweetline_document();
+
+        if let Some(runtime) = &mut self.jflsp_runtime {
+             let did_open_params = json!({
+                "textDocument": {
+                    "uri": self.doc_uri.clone(),
+                    "languageId": "java",
+                    "version": self.lsp_version,
+                    "text": content
+                }
+            });
+            let _ = runtime.client.send_notification("textDocument/didOpen", did_open_params);
+        }
+
         cx.notify();
     }
 
@@ -406,7 +527,43 @@ impl CodeEditor {
         let mut messages = Vec::new();
         if let Some(runtime) = &mut self.jflsp_runtime {
              while let Some(msg) = runtime.poll_message() {
-                 println!("LSP Message: {:?}", msg);
+                 match &msg {
+                    JsonRpcMessage::Response(resp) => {
+                         if let Some(result) = &resp.result {
+                             println!("LSP Response [{}]: {}", 
+                                resp.id.as_ref().and_then(|v| v.as_u64()).unwrap_or(0), 
+                                serde_json::to_string_pretty(result).unwrap_or_default()
+                             );
+                         } else if let Some(error) = &resp.error {
+                             println!("LSP Error [{}]: {}", 
+                                resp.id.as_ref().and_then(|v| v.as_u64()).unwrap_or(0), 
+                                serde_json::to_string_pretty(error).unwrap_or_default()
+                             );
+                        } else {
+                             println!("LSP Response [{}]: null", 
+                                resp.id.as_ref().and_then(|v| v.as_u64()).unwrap_or(0)
+                             );
+                        }
+                    }
+                    JsonRpcMessage::Notification(notif) => {
+                        // Skip publishDiagnostics noise if empty
+                        if notif.method == "textDocument/publishDiagnostics" {
+                            // Only print if there are diagnostics
+                             if let Some(params) = &notif.params {
+                                 if let Ok(p) = serde_json::from_value::<PublishDiagnosticsParams>(params.clone()) {
+                                     if !p.diagnostics.is_empty() {
+                                         println!("LSP Diagnostics: {}", serde_json::to_string_pretty(&p).unwrap_or_default());
+                                     }
+                                 }
+                             }
+                        } else {
+                            println!("LSP Notification [{}]: {}", notif.method, 
+                                notif.params.as_ref().map(|p| serde_json::to_string_pretty(p).unwrap_or_default()).unwrap_or_default()
+                            );
+                        }
+                    }
+                    _ => println!("LSP Message: {:?}", msg),
+                 }
                  messages.push(msg);
              }
         }
@@ -418,18 +575,47 @@ impl CodeEditor {
 
     fn handle_lsp_message(&mut self, msg: JsonRpcMessage, cx: &mut Context<Self>) {
         match msg {
+            JsonRpcMessage::Notification(notif) => {
+                if notif.method == "textDocument/publishDiagnostics" {
+                    if let Some(params) = notif.params {
+                        if let Ok(params) = serde_json::from_value::<PublishDiagnosticsParams>(params) {
+                            if params.uri == self.doc_uri {
+                                let mut decorations = Vec::new();
+                                for d in params.diagnostics {
+                                    let start_offset = self.lsp_point_to_offset(d.range.start.line as usize, d.range.start.character as usize);
+                                    let end_offset = self.lsp_point_to_offset(d.range.end.line as usize, d.range.end.character as usize);
+                                    
+                                    let color = match d.severity.unwrap_or(1) {
+                                        1 => DecorationColor::Red,
+                                        2 => DecorationColor::Yellow,
+                                        _ => DecorationColor::Gray,
+                                    };
+                                    
+                                    decorations.push(Decoration {
+                                        range: start_offset..end_offset,
+                                        color,
+                                        message: Some(d.message),
+                                    });
+                                }
+                                self.decorations = decorations;
+                                cx.notify();
+                            }
+                        }
+                    }
+                }
+            }
             JsonRpcMessage::Response(resp) => {
                 if let Some(error) = &resp.error {
                     println!("LSP Error: {:?}", error);
                 }
                 
-                if let Some((id, kind)) = self.pending_request {
-                     let matches = match &resp.id {
-                         Some(Value::Number(n)) => n.as_u64().map(|v| v as usize) == Some(id),
-                         _ => false,
-                     };
+                let id = match &resp.id {
+                    Some(Value::Number(n)) => n.as_u64().map(|v| v as usize),
+                    _ => None,
+                };
 
-                     if matches {
+                if let Some(id) = id {
+                    if let Some(kind) = self.pending_lsp_requests.remove(&id) {
                          if let Some(result) = &resp.result {
                              match kind {
                                  LspRequestKind::Completion { .. } => {
@@ -488,13 +674,7 @@ impl CodeEditor {
                                  }
                                  LspRequestKind::Hover { pos, .. } => {
                                      if let Some(contents) = result.get("contents") {
-                                         let text = if let Some(s) = contents.as_str() {
-                                             s.to_string()
-                                         } else if let Some(obj) = contents.as_object() {
-                                             obj.get("value").and_then(|v| v.as_str()).unwrap_or("").to_string()
-                                         } else {
-                                              "".to_string()
-                                         };
+                                         let text = hover_content_as_string(contents);
                                          
                                          if !text.is_empty() {
                                              self.hover_popup = Some(HoverPopup {
@@ -506,14 +686,141 @@ impl CodeEditor {
                                          }
                                      }
                                  }
+                                 LspRequestKind::Definition { .. } => {
+                                     let mut location = None;
+                                     if let Ok(loc) = serde_json::from_value::<Location>(result.clone()) {
+                                         location = Some(loc);
+                                     } else if let Some(arr) = result.as_array() {
+                                         if let Some(first) = arr.first() {
+                                              if let Ok(loc) = serde_json::from_value::<Location>(first.clone()) {
+                                                  location = Some(loc);
+                                              }
+                                         }
+                                     }
+                                     
+                                     if let Some(loc) = location {
+                                         if loc.uri == self.doc_uri {
+                                            let start_offset = self.lsp_point_to_offset(loc.range.start.line as usize, loc.range.start.character as usize);
+                                            self.core.set_cursor(start_offset);
+                                            self.scroll_to_cursor(cx);
+                                            cx.notify();
+                                        } else {
+                                            if let Ok(url) = Url::parse(&loc.uri) {
+                                                if let Ok(path) = url.to_file_path() {
+                                                    cx.emit(CodeEditorEvent::OpenFile(path));
+                                                }
+                                            }
+                                        }
+                                     }
+                                 }
+                                 LspRequestKind::SignatureHelp { .. } => {
+                                     if let Ok(help) = serde_json::from_value::<SignatureHelpResult>(result.clone()) {
+                                         if !help.signatures.is_empty() {
+                                             let active_sig = help.active_signature.unwrap_or(0) as usize;
+                                             if let Some(sig) = help.signatures.get(active_sig) {
+                                                 let mut text = sig.label.clone();
+                                                 if let Some(doc) = &sig.documentation {
+                                                      text.push_str("\n\n");
+                                                      text.push_str(&hover_content_as_string(doc));
+                                                 }
+                                                 
+                                                 // Show near cursor
+                                                 let index = self.core.primary_selection().head;
+                                                 let pos = self.point_for_index(index);
+                                                 self.hover_popup = Some(HoverPopup {
+                                                     text,
+                                                     position: pos,
+                                                     color: DecorationColor::Gray,
+                                                 });
+                                                 cx.notify();
+                                             }
+                                         }
+                                     }
+                                 }
+                                 LspRequestKind::Formatting => {
+                                     let mut edits = Vec::new();
+                                     if let Ok(edit_list) = serde_json::from_value::<Vec<TextEdit>>(result.clone()) {
+                                         for edit in edit_list {
+                                             let start_offset = self.lsp_point_to_offset(edit.range.start.line as usize, edit.range.start.character as usize);
+                                             let end_offset = self.lsp_point_to_offset(edit.range.end.line as usize, edit.range.end.character as usize);
+                                             edits.push((start_offset..end_offset, edit.new_text));
+                                         }
+                                     } else if let Ok(edit) = serde_json::from_value::<TextEdit>(result.clone()) {
+                                         let start_offset = self.lsp_point_to_offset(edit.range.start.line as usize, edit.range.start.character as usize);
+                                         let end_offset = self.lsp_point_to_offset(edit.range.end.line as usize, edit.range.end.character as usize);
+                                         edits.push((start_offset..end_offset, edit.new_text));
+                                     }
+                                     
+                                     if !edits.is_empty() {
+                                         self.core.apply_edits(edits);
+                                         self.sync_sweetline_document();
+                                         cx.notify();
+                                     }
+                                 }
                                  _ => {}
                              }
                          }
-                         self.pending_request = None;
-                     }
+                    }
                 }
             }
             _ => {}
+        }
+    }
+
+    fn scroll_to_cursor(&mut self, cx: &mut Context<Self>) {
+        if let Some(bounds) = self.layout.last_bounds {
+            let index = self.core.primary_selection().head;
+            let (line, _, _) = Self::line_col_for_index(&self.core.content, index);
+            
+            let line_height = self.layout.line_height();
+            let line_top = line_height * line as f32;
+            let line_bottom = line_top + line_height;
+            
+            let scroll_top = -self.layout.scroll_offset.y;
+            let scroll_bottom = scroll_top + bounds.size.height;
+            
+            if line_top < scroll_top {
+                self.layout.scroll_offset.y = -line_top;
+            } else if line_bottom > scroll_bottom {
+                self.layout.scroll_offset.y = -(line_bottom - bounds.size.height);
+            }
+            cx.notify();
+        }
+    }
+
+    fn point_for_index(&mut self, index: usize) -> Point<Pixels> {
+        if let Some(bounds) = self.layout.last_bounds {
+            let (line, _, line_start) = Self::line_col_for_index(&self.core.content, index);
+            let line_slice = self.core.content.line(line);
+            let mut line_text_string = line_slice.to_string();
+            if line_text_string.ends_with('\n') {
+                line_text_string.pop();
+                if line_text_string.ends_with('\r') {
+                    line_text_string.pop();
+                }
+            }
+            
+            let key = format!("{}:{}", line, line_text_string);
+            let x_offset = if let Ok(mut cache) = self.render_cache.lock() {
+                if let Some(line) = cache.get(&key) {
+                     let local_index = index.saturating_sub(line_start);
+                     line.x_for_index(local_index)
+                } else {
+                    px(0.0)
+                }
+            } else {
+                px(0.0)
+            };
+            
+            let line_count = self.core.content.len_lines().max(1);
+            let max_digits = line_count.to_string().len();
+            let text_x = self.layout.text_x(bounds, max_digits);
+            
+            let y = self.layout.line_y(bounds, line);
+            
+            point(text_x + x_offset, y)
+        } else {
+            point(px(0.0), px(0.0))
         }
     }
 
@@ -523,6 +830,63 @@ impl CodeEditor {
         let primary = self.core.primary_selection();
         if primary.is_empty() {
             let cursor = primary.head;
+            
+            // --- C++ Keyword Completion (Fixed) ---
+            let content = &self.core.content;
+            let mut word_start = cursor;
+            let mut current_idx = cursor;
+            while current_idx > 0 {
+                let char_idx = content.byte_to_char(current_idx);
+                if char_idx == 0 && current_idx > 0 {
+                     break;
+                }
+                let prev_char_idx = char_idx - 1;
+                let ch = content.char(prev_char_idx);
+                let char_len = ch.len_utf8();
+                let prev_byte_idx = current_idx - char_len;
+
+                if !ch.is_alphanumeric() && ch != '_' && ch != '#' {
+                    word_start = current_idx;
+                    break;
+                }
+                current_idx = prev_byte_idx;
+                word_start = current_idx;
+            }
+            
+            let prefix = content.slice(word_start..cursor).to_string();
+            
+            if !prefix.is_empty() {
+                 let keywords = vec![
+                    "int", "char", "void", "return", "class", "struct", 
+                    "template", "typename", "static", "const", "virtual", 
+                    "override", "public", "private", "protected", "if", 
+                    "else", "for", "while", "do", "switch", "case", 
+                    "break", "continue", "namespace", "using", "include",
+                    "std", "vector", "string", "map", "auto", "bool", "true", "false",
+                    "nullptr", "this", "new", "delete", "friend", "inline"
+                ];
+                
+                let items: Vec<CompletionItem> = keywords.into_iter()
+                    .filter(|k| k.starts_with(&prefix))
+                    .map(|k| CompletionItem {
+                        label: k.to_string(),
+                        kind: CompletionKind::Keyword,
+                        detail: "C++ Keyword".to_string(),
+                    })
+                    .collect();
+
+                if !items.is_empty() {
+                    self.core.completion_items = items;
+                    self.core.completion_active = true;
+                    self.core.completion_index = 0;
+                    self.completion_scroll_offset = 0.0;
+                    cx.notify();
+                    // Return early to skip LSP for now as requested
+                    return;
+                }
+            }
+            // --- End C++ Keyword Completion ---
+
             let (line, col) = self.lsp_position_for_index(cursor);
             let params = json!({
                 "textDocument": {
@@ -533,9 +897,17 @@ impl CodeEditor {
                     "character": col
                 }
             });
+            /*
+            // Temporarily disabled LSP completion to favor fixed C++ keywords
             if let Some(runtime) = &mut self.jflsp_runtime {
-                if let Ok(id) = runtime.client.send_request("textDocument/completion", params) {
-                    self.pending_request = Some((id, LspRequestKind::Completion { index: cursor }));
+                match runtime.client.send_request("textDocument/completion", params) {
+                    Ok(id) => {
+                        println!("Sent completion request id={}", id);
+                        self.pending_lsp_requests.insert(id, LspRequestKind::Completion { index: cursor });
+                    },
+                    Err(e) => {
+                        println!("Failed to send completion request: {}", e);
+                    }
                 }
             } else {
             // Fallback when JFLSP is missing: Show warning if triggered by '.'
@@ -557,6 +929,7 @@ impl CodeEditor {
                     }
                 }
             }
+            */
         }
     }
 
@@ -757,6 +1130,74 @@ impl CodeEditor {
     fn find_next(&mut self, _: &FindNext, _: &mut Window, _: &mut Context<Self>) {}
     fn find_prev(&mut self, _: &FindPrev, _: &mut Window, _: &mut Context<Self>) {}
     fn cancel_find(&mut self, _: &CancelFind, _: &mut Window, _: &mut Context<Self>) {}
+
+    fn go_to_definition(&mut self, _: &GoToDefinition, _: &mut Window, _cx: &mut Context<Self>) {
+        let index = self.core.primary_selection().head;
+        let (line, col) = self.lsp_position_for_index(index);
+        let uri = self.doc_uri.clone();
+
+        if let Some(runtime) = &mut self.jflsp_runtime {
+            let params = TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri,
+                },
+                position: Position {
+                    line: line as u32,
+                    character: col as u32,
+                },
+            };
+            if let Ok(id) = runtime.client.send_request("textDocument/definition", serde_json::to_value(params).unwrap()) {
+                self.pending_lsp_requests.insert(id, LspRequestKind::Definition { index });
+            }
+        }
+    }
+
+    fn signature_help(&mut self, _: &SignatureHelp, _: &mut Window, _cx: &mut Context<Self>) {
+        let index = self.core.primary_selection().head;
+        let (line, col) = self.lsp_position_for_index(index);
+        let uri = self.doc_uri.clone();
+
+        if let Some(runtime) = &mut self.jflsp_runtime {
+            let params = TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri,
+                },
+                position: Position {
+                    line: line as u32,
+                    character: col as u32,
+                },
+            };
+            if let Ok(id) = runtime.client.send_request("textDocument/signatureHelp", serde_json::to_value(params).unwrap()) {
+                self.pending_lsp_requests.insert(id, LspRequestKind::SignatureHelp { index });
+            }
+        }
+    }
+
+    fn format_document(&mut self, _: &FormatDocument, _: &mut Window, _cx: &mut Context<Self>) {
+        let uri = self.doc_uri.clone();
+        if let Some(runtime) = &mut self.jflsp_runtime {
+            let params = DocumentFormattingParams {
+                text_document: TextDocumentIdentifier {
+                    uri,
+                },
+                options: FormattingOptions {
+                    tab_size: 4,
+                    insert_spaces: true,
+                    properties: HashMap::new(),
+                },
+            };
+            if let Ok(id) = runtime.client.send_request("textDocument/formatting", serde_json::to_value(params).unwrap()) {
+                self.pending_lsp_requests.insert(id, LspRequestKind::Formatting);
+            }
+        }
+    }
+
+    fn escape(&mut self, _: &Escape, _: &mut Window, cx: &mut Context<Self>) {
+        self.core.selections = vec![self.core.selections[0].clone()];
+        self.core.completion_active = false;
+        self.hover_popup = None;
+        cx.notify();
+    }
 
     fn on_modifiers_changed(
         &mut self,
@@ -1251,6 +1692,39 @@ impl CodeEditor {
         (line_index, col_utf16)
     }
 
+    fn lsp_point_to_offset(&self, line: usize, char_utf16: usize) -> usize {
+        let content = &self.core.content;
+        if line >= content.len_lines() {
+             return content.len_bytes();
+        }
+        let line_start_byte = content.line_to_byte(line);
+        let line_slice = content.line(line);
+        
+        // Fast path: if char_utf16 is 0, return start of line
+        if char_utf16 == 0 {
+            return line_start_byte;
+        }
+
+        // Iterate chars to find byte offset matching utf16 length
+        let mut current_utf16 = 0;
+        let mut byte_offset_in_line = 0;
+        
+        for char in line_slice.chars() {
+             if current_utf16 >= char_utf16 {
+                 break;
+             }
+             let len = char.len_utf16();
+             if current_utf16 + len > char_utf16 {
+                 // pointing into middle of a char? return start of this char
+                 break;
+             }
+             current_utf16 += len;
+             byte_offset_in_line += char.len_utf8();
+        }
+        
+        line_start_byte + byte_offset_in_line
+    }
+
     fn index_for_line_col(content: &Rope, line: usize, col: usize) -> usize {
         if line >= content.len_lines() {
             return content.len_bytes();
@@ -1631,24 +2105,34 @@ impl CodeEditor {
         // If no local decoration, request from LSP
         if let Some(idx) = index {
             let (line, col) = self.lsp_position_for_index(idx);
-            if let Some(runtime) = &mut self.jflsp_runtime {
-                // Only send if we aren't already waiting for this hover or if we moved enough?
-                // For simplicity, we just send. But we should check if we already have a pending hover for this pos?
-                // Let's just send it.
-                let params = json!({
-                    "textDocument": {
-                        "uri": self.doc_uri.clone()
-                    },
-                    "position": {
-                        "line": line,
-                        "character": col
+            
+            // Debounce/Check duplicate: If we already requested hover for this position recently, skip
+            // We use a simplified check here. In a robust impl, we'd want true debouncing.
+            let already_pending = self.pending_lsp_requests.values().any(|k| {
+                 if let LspRequestKind::Hover { index, .. } = k {
+                     *index == idx
+                 } else {
+                     false
+                 }
+            });
+
+            if !already_pending {
+                if let Some(runtime) = &mut self.jflsp_runtime {
+                    let params = json!({
+                        "textDocument": {
+                            "uri": self.doc_uri.clone()
+                        },
+                        "position": {
+                            "line": line,
+                            "character": col
+                        }
+                    });
+                    
+                    if let Ok(id) = runtime.client.send_request("textDocument/hover", params) {
+                        self.pending_lsp_requests.insert(id, LspRequestKind::Hover { index: idx, pos });
                     }
-                });
-                
-                if let Ok(id) = runtime.client.send_request("textDocument/hover", params) {
-                    self.pending_request = Some((id, LspRequestKind::Hover { index: idx, pos }));
                 }
-             }
+            }
         }
         
         // Don't clear immediately if waiting for LSP, but maybe we should?
@@ -1850,6 +2334,10 @@ impl Render for CodeEditor {
             .on_action(cx.listener(Self::find_next))
             .on_action(cx.listener(Self::find_prev))
             .on_action(cx.listener(Self::cancel_find))
+            .on_action(cx.listener(Self::escape))
+            .on_action(cx.listener(Self::go_to_definition))
+            .on_action(cx.listener(Self::signature_help))
+            .on_action(cx.listener(Self::format_document))
             .child(code_editor_canvas(editor, focus_handle))
     }
 }

@@ -59,14 +59,17 @@ impl LspClient {
 
         thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
+            println!("LSP reader thread started");
             loop {
                 let mut line = String::new();
                 let mut content_length = 0;
 
                 while let Ok(n) = reader.read_line(&mut line) {
                     if n == 0 {
+                        println!("LSP stdout EOF");
                         return;
                     }
+                    println!("LSP header: {:?}", line.trim()); 
                     if line == "\r\n" {
                         break;
                     }
@@ -83,6 +86,7 @@ impl LspClient {
                     let mut buffer = vec![0u8; content_length];
                     if reader.read_exact(&mut buffer).is_ok() {
                         if let Ok(json_str) = String::from_utf8(buffer) {
+                            println!("LSP Body: {}", json_str);
                             // Try to parse as Notification first (method present, no id)
                             // Or Response (id present)
                             // Or generic Value
@@ -140,6 +144,7 @@ impl LspClient {
         println!("jflsp -> request: {}", json);
         let content = format!("Content-Length: {}\r\n\r\n{}", json.len(), json);
         self.stdin.write_all(content.as_bytes())?;
+        self.stdin.flush()?;
         Ok(id)
     }
 
@@ -154,6 +159,7 @@ impl LspClient {
         println!("jflsp -> notification: {}", json);
         let content = format!("Content-Length: {}\r\n\r\n{}", json.len(), json);
         self.stdin.write_all(content.as_bytes())?;
+        self.stdin.flush()?;
         Ok(())
     }
 }

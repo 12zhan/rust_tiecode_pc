@@ -91,9 +91,12 @@ jobs:
       - name: Run tests
         run: cargo test --release --verbose
 
-      - name: Upload macOS binary
+      - name: Bundle macOS app
+        run: bash .github/scripts/bundle_macos.sh
+
+      - name: Upload macOS app
         uses: actions/upload-artifact@v4
         with:
-          name: myapp-macos
-          path: target/release/tiecode
+          name: tiecode-macos
+          path: dist/tiecode-macos.zip
           if-no-files-found: error

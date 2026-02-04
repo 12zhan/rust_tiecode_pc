@@ -1,8 +1,10 @@
 use super::tie_svg::tie_svg;
 use gpui::*;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 #[derive(Clone)]
@@ -38,14 +40,26 @@ pub enum FileTreeEvent {
         path: PathBuf,
         is_dir: bool,
     },
+    RequestMove {
+        src: PathBuf,
+        dst: PathBuf,
+    },
+    RequestDelete {
+        path: PathBuf,
+        is_dir: bool,
+    },
 }
 
 pub struct FileTree {
-    root_path: PathBuf,
+    root_path: Option<PathBuf>,
     expanded_paths: HashSet<PathBuf>,
     visible_entries: Vec<FileEntry>,
     focus_handle: FocusHandle,
     list_state: ListState,
+    fs_watch_active: bool,
+    fs_watcher: Option<RecommendedWatcher>,
+    fs_watcher_root: Option<PathBuf>,
+    fs_event_rx: Option<mpsc::Receiver<()>>,
     drag_source: Option<PathBuf>,
     drag_hover: Option<PathBuf>,
     drag_active: bool,
@@ -61,13 +75,17 @@ pub struct FileTree {
 impl EventEmitter<FileTreeEvent> for FileTree {}
 
 impl FileTree {
-    pub fn new(root_path: PathBuf, cx: &mut Context<Self>) -> Self {
+    pub fn new(root_path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let mut tree = Self {
             root_path: root_path.clone(),
             expanded_paths: HashSet::new(),
             visible_entries: Vec::new(),
             focus_handle: cx.focus_handle(),
             list_state: ListState::new(0, ListAlignment::Top, px(20.0)),
+            fs_watch_active: false,
+            fs_watcher: None,
+            fs_watcher_root: None,
+            fs_event_rx: None,
             drag_source: None,
             drag_hover: None,
             drag_active: false,
@@ -80,11 +98,104 @@ impl FileTree {
             virtual_nodes: HashMap::new(),
         };
         tree.refresh_internal(false);
+        tree.ensure_fs_watch(cx);
         tree
     }
 
     pub fn refresh(&mut self) {
         self.refresh_internal(true);
+    }
+
+    fn ensure_fs_watch(&mut self, cx: &mut Context<Self>) {
+        if self.fs_watch_active {
+            return;
+        }
+        self.fs_watch_active = true;
+        self.sync_fs_watcher();
+        cx.spawn(|entity: WeakEntity<FileTree>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(250))
+                        .await;
+                    let updated = entity.update(&mut cx, |this, cx| {
+                        this.sync_fs_watcher();
+                        if this.drain_fs_events() {
+                            this.refresh_internal(true);
+                            cx.notify();
+                        }
+                    });
+                    if updated.is_err() {
+                        break;
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn sync_fs_watcher(&mut self) {
+        let Some(root_path) = self.root_path.as_ref() else {
+            self.fs_event_rx = None;
+            self.fs_watcher = None;
+            self.fs_watcher_root = None;
+            return;
+        };
+
+        if self.fs_watcher_root.as_ref() == Some(root_path) && self.fs_watcher.is_some() {
+            return;
+        }
+
+        self.fs_event_rx = None;
+        self.fs_watcher = None;
+        self.fs_watcher_root = None;
+
+        let (tx, rx) = mpsc::channel::<()>();
+        let mut watcher = match notify::recommended_watcher(move |_res| {
+            let _ = tx.send(());
+        }) {
+            Ok(watcher) => watcher,
+            Err(err) => {
+                println!("FileTree fs watcher init failed: {:?}", err);
+                return;
+            }
+        };
+
+        if let Err(err) = watcher.watch(root_path, RecursiveMode::Recursive) {
+            println!("FileTree fs watcher watch failed: {:?} ({:?})", err, root_path);
+            return;
+        }
+
+        self.fs_watcher = Some(watcher);
+        self.fs_watcher_root = Some(root_path.clone());
+        self.fs_event_rx = Some(rx);
+    }
+
+    fn drain_fs_events(&mut self) -> bool {
+        let mut changed = false;
+        let mut disconnected = false;
+
+        if let Some(rx) = self.fs_event_rx.as_ref() {
+            loop {
+                match rx.try_recv() {
+                    Ok(()) => changed = true,
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if disconnected {
+            self.fs_event_rx = None;
+            self.fs_watcher = None;
+            self.fs_watcher_root = None;
+        }
+
+        changed
     }
 
     fn refresh_internal(&mut self, preserve_scroll: bool) {
@@ -95,21 +206,27 @@ impl FileTree {
         };
 
         self.visible_entries.clear();
-        let root_name = self
-            .root_path
+        let root_path = match self.root_path.as_ref() {
+            Some(path) => path.clone(),
+            None => {
+                self.list_state.reset(0);
+                return;
+            }
+        };
+        let root_name = root_path
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| self.root_path.to_string_lossy().to_string());
-        let root_expanded = self.expanded_paths.contains(&self.root_path);
+            .unwrap_or_else(|| root_path.to_string_lossy().to_string());
+        let root_expanded = self.expanded_paths.contains(&root_path);
         self.visible_entries.push(FileEntry {
-            path: self.root_path.clone(),
+            path: root_path.clone(),
             name: root_name,
             is_dir: true,
             depth: 0,
             is_expanded: root_expanded,
         });
         if root_expanded {
-            self.append_entries(&self.root_path.clone(), 1);
+            self.append_entries(&root_path.clone(), 1);
         }
         if self.pending_new_item.is_some() {
             let (insert_index, depth) = {
@@ -131,9 +248,10 @@ impl FileTree {
     }
 
     pub fn set_root_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.root_path = path;
+        self.root_path = Some(path);
         self.expanded_paths.clear();
         self.refresh_internal(false);
+        self.sync_fs_watcher();
         cx.notify();
     }
 
@@ -216,13 +334,20 @@ impl FileTree {
             return;
         }
 
+        let root_path = match self.root_path.as_ref() {
+            Some(path) => path,
+            None => {
+                cx.notify();
+                return;
+            }
+        };
         let parent = if pending.anchor_is_dir {
             pending.anchor_path
         } else {
             pending
                 .anchor_path
                 .parent()
-                .unwrap_or(&self.root_path)
+                .unwrap_or(root_path)
                 .to_path_buf()
         };
 
@@ -483,7 +608,21 @@ impl Render for FileTree {
 
         let view_mousemove = view.clone();
 
-        let root_path = self.root_path.clone();
+        let root_path = match self.root_path.clone() {
+            Some(path) => path,
+            None => {
+                return div()
+                    .w_full()
+                    .h_full()
+                    .bg(theme_surface)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(12.0))
+                    .text_color(rgb(0xff8b949e))
+                    .child("拖拽文件夹打开");
+            }
+        };
         let selected_path = self.selected_path.clone();
         let selection_time = self.selection_time;
         let selected_parent_path = selected_path
@@ -754,11 +893,12 @@ impl Render for FileTree {
                                             this.drag_active = true;
                                             let hover_target = if is_dir {
                                                 path_move.clone()
+                                            } else if let Some(parent) = path_move.parent() {
+                                                parent.to_path_buf()
+                                            } else if let Some(root_path) = this.root_path.as_ref() {
+                                                root_path.clone()
                                             } else {
-                                                path_move
-                                                    .parent()
-                                                    .unwrap_or(&this.root_path)
-                                                    .to_path_buf()
+                                                return;
                                             };
                                             this.drag_hover = Some(hover_target);
                                             cx.notify();
@@ -774,13 +914,16 @@ impl Render for FileTree {
                                     let src = this.drag_source.take();
                                     let dst = this.drag_hover.take();
                                     this.drag_active = false;
-                                    if let (Some(src), Some(dst)) = (src, dst) {
-                                        if dst != src && !this.is_descendant(&src, &dst) {
-                                            // UI-only mode: Do not move files
-                                            println!("UI Drag: Would move {:?} -> {:?}", src, dst);
-                                            cx.notify();
+                                    if let (Some(src), Some(dst_dir)) = (src, dst) {
+                                        if dst_dir != src && !this.is_descendant(&src, &dst_dir) {
+                                            if let Some(name) = src.file_name() {
+                                                let dst = dst_dir.join(name);
+                                                if dst != src {
+                                                    cx.emit(FileTreeEvent::RequestMove { src, dst });
+                                                }
+                                            }
                                         } else {
-                                            println!("Invalid move: {:?} -> {:?}", src, dst);
+                                            println!("Invalid move: {:?} -> {:?}", src, dst_dir);
                                         }
                                     }
                                 } else {

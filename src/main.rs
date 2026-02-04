@@ -6,7 +6,9 @@ pub mod lsp;
 
 use component::{
     file_tree::{file_icon, FileTree, FileTreeEvent},
+    modal::modal,
     popover::popover,
+    tie_svg::tie_svg,
 };
 use editor::{
     Backspace, CodeEditor, CodeEditorEvent, Copy, CtrlShiftTab, Cut, Delete, DeleteLine, Down, Enter, Escape,
@@ -47,12 +49,35 @@ impl AssetSource for Assets {
 
 #[allow(dead_code)]
 static APP_ID: &str = "d8b8e2b1-0c9b-4b7e-8b8a-0c9b4b7e8b8a";
+
+fn default_assets_base() -> PathBuf {
+    if let Ok(base) = std::env::var("TIECODE_ASSETS_BASE") {
+        return PathBuf::from(base);
+    }
+
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            if cfg!(target_os = "macos") {
+                let resources_dir = exe_dir.join("../Resources");
+                if resources_dir.join("assets").is_dir() {
+                    return resources_dir;
+                }
+            }
+
+            if exe_dir.join("assets").is_dir() {
+                return exe_dir.to_path_buf();
+            }
+        }
+    }
+
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
 fn main() {
     env_logger::init();
 
     Application::new()
         .with_assets(Assets {
-            base: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            base: default_assets_base(),
         })
         .run(|context: &mut App| {
         info!("tiecode for desktop start success!");
@@ -122,7 +147,7 @@ fn main() {
                     let sample = "类 启动类\n{\n    方法 启动方法()\n    {\n        变量 list: 列表<文本> = 新建 列表<文本>()\n        list.\n    }\n}\n";
                     editor.set_content(sample.to_string(), cx);
                 }); */
-                let file_tree = cx.new(|cx| FileTree::new(std::env::current_dir().unwrap_or(std::path::PathBuf::from(".")), cx));
+                let file_tree = cx.new(|cx| FileTree::new(None, cx));
                 cx.new(|cx| {
                     let subscription = cx.subscribe(&file_tree, |this: &mut StartWindow, _emitter, event: &FileTreeEvent, cx| {
                         match event {
@@ -135,6 +160,24 @@ fn main() {
                                 this.context_menu_path = Some(path.clone());
                                 this.context_menu_is_dir = *is_dir;
                                 cx.notify();
+                            }
+                            FileTreeEvent::RequestMove { src, dst } => {
+                                this.request_confirm(
+                                    ConfirmAction::Move {
+                                        src: src.clone(),
+                                        dst: dst.clone(),
+                                    },
+                                    cx,
+                                );
+                            }
+                            FileTreeEvent::RequestDelete { path, is_dir } => {
+                                this.request_confirm(
+                                    ConfirmAction::Delete {
+                                        path: path.clone(),
+                                        is_dir: *is_dir,
+                                    },
+                                    cx,
+                                );
                             }
                         }
                     });
@@ -152,6 +195,12 @@ fn main() {
                         file_tree,
                         open_tabs: Vec::new(),
                         active_tab: None,
+                        external_drag_position: point(px(0.0), px(0.0)),
+                        external_drag_primary: None,
+                        external_drag_is_dir: false,
+                        external_drag_count: 0,
+                        confirm_open: false,
+                        confirm_action: None,
                         context_menu_open: false,
                         context_menu_position: point(px(0.0), px(0.0)),
                         context_menu_path: None,
@@ -172,11 +221,23 @@ struct StartWindow {
     file_tree: Entity<FileTree>,
     open_tabs: Vec<PathBuf>,
     active_tab: Option<PathBuf>,
+    external_drag_position: Point<Pixels>,
+    external_drag_primary: Option<PathBuf>,
+    external_drag_is_dir: bool,
+    external_drag_count: usize,
+    confirm_open: bool,
+    confirm_action: Option<ConfirmAction>,
     context_menu_open: bool,
     context_menu_position: Point<Pixels>,
     context_menu_path: Option<PathBuf>,
     context_menu_is_dir: bool,
     _subscriptions: Vec<Subscription>,
+}
+
+#[derive(Clone)]
+enum ConfirmAction {
+    Move { src: PathBuf, dst: PathBuf },
+    Delete { path: PathBuf, is_dir: bool },
 }
 
 impl StartWindow {
@@ -192,6 +253,94 @@ impl StartWindow {
             cx.notify();
         }
     }
+
+    fn close_tab(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
+        let was_active = self.active_tab.as_ref() == Some(path);
+        self.open_tabs.retain(|p| p != path);
+        if was_active {
+            if let Some(next_path) = self.open_tabs.last().cloned() {
+                self.open_file_path(next_path, cx);
+            } else {
+                self.active_tab = None;
+                self.editor.update(cx, |editor, cx| {
+                    editor.set_content(String::new(), cx);
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    fn request_confirm(&mut self, action: ConfirmAction, cx: &mut Context<Self>) {
+        self.confirm_action = Some(action);
+        self.confirm_open = true;
+        cx.notify();
+    }
+
+    fn cancel_confirm(&mut self, cx: &mut Context<Self>) {
+        self.confirm_open = false;
+        self.confirm_action = None;
+        cx.notify();
+    }
+
+    fn apply_confirm(&mut self, cx: &mut Context<Self>) {
+        let action = self.confirm_action.take();
+        self.confirm_open = false;
+        if let Some(action) = action {
+            match action {
+                ConfirmAction::Move { src, dst } => {
+                    match std::fs::rename(&src, &dst) {
+                        Ok(_) => {
+                            if let Some(index) = self.open_tabs.iter().position(|p| p == &src) {
+                                self.open_tabs[index] = dst.clone();
+                            }
+                            if self.active_tab.as_ref() == Some(&src) {
+                                self.active_tab = Some(dst);
+                            }
+                            let file_tree = self.file_tree.clone();
+                            file_tree.update(cx, |tree, cx| {
+                                tree.refresh();
+                                cx.notify();
+                            });
+                        }
+                        Err(err) => {
+                            println!("Move failed: {:?} -> {:?}, {}", src, dst, err);
+                        }
+                    }
+                }
+                ConfirmAction::Delete { path, is_dir } => {
+                    let result = if is_dir {
+                        std::fs::remove_dir_all(&path)
+                    } else {
+                        std::fs::remove_file(&path)
+                    };
+                    match result {
+                        Ok(_) => {
+                            self.open_tabs.retain(|p| p != &path);
+                            if self.active_tab.as_ref() == Some(&path) {
+                                self.active_tab = self.open_tabs.last().cloned();
+                                if let Some(next) = self.active_tab.clone() {
+                                    self.open_file_path(next, cx);
+                                } else {
+                                    self.editor.update(cx, |editor, cx| {
+                                        editor.set_content(String::new(), cx);
+                                    });
+                                }
+                            }
+                            let file_tree = self.file_tree.clone();
+                            file_tree.update(cx, |tree, cx| {
+                                tree.refresh();
+                                cx.notify();
+                            });
+                        }
+                        Err(err) => {
+                            println!("Delete failed: {:?}, {}", path, err);
+                        }
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
 }
 
 impl Render for StartWindow {
@@ -206,9 +355,19 @@ impl Render for StartWindow {
         let context_menu_path = self.context_menu_path.clone();
         let context_menu_is_dir = self.context_menu_is_dir;
         let context_menu_position = self.context_menu_position;
+        let confirm_action = self.confirm_action.clone();
+        let confirm_open = self.confirm_open;
+        let view_for_confirm = view.clone();
+        let view_for_cancel = view_for_confirm.clone();
+        let view_for_dismiss = view_for_confirm.clone();
         let open_tabs = self.open_tabs.clone();
         let active_tab = self.active_tab.clone();
         let view_for_menu = view.clone();
+        let external_drag_position = self.external_drag_position;
+        let external_drag_primary = self.external_drag_primary.clone();
+        let external_drag_is_dir = self.external_drag_is_dir;
+        let external_drag_count = self.external_drag_count;
+        let show_external_drag = cx.has_active_drag() && external_drag_primary.is_some();
 
         let mut tabs_bar = div()
             .w_full()
@@ -227,7 +386,9 @@ impl Render for StartWindow {
                 .unwrap_or_else(|| path.to_string_lossy().to_string());
             let is_active = active_tab.as_ref().map(|p| p == &path).unwrap_or(false);
             let view_for_tab = view.clone();
+            let view_for_close = view_for_tab.clone();
             let path_clone = path.clone();
+            let path_for_close = path.clone();
             let tab = div()
                 .mr(px(4.0))
                 .px(px(10.0))
@@ -246,7 +407,23 @@ impl Render for StartWindow {
                     rgba(0x00000000)
                 })
                 .hover(|s| s.bg(rgba(0xffffff12)))
+                .flex()
+                .items_center()
                 .child(label)
+                .child(
+                    div()
+                        .ml(px(6.0))
+                        .text_size(px(12.0))
+                        .text_color(rgb(0xff8b949e))
+                        .hover(|s| s.text_color(rgb(0xffe6e0d9)))
+                        .child("×")
+                        .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                            cx.stop_propagation();
+                            view_for_close.update(cx, |this, cx| {
+                                this.close_tab(&path_for_close, cx);
+                            });
+                        }),
+                )
                 .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
                     view_for_tab.update(cx, |this, cx| {
                         this.open_file_path(path_clone.clone(), cx);
@@ -255,13 +432,67 @@ impl Render for StartWindow {
             tabs_bar = tabs_bar.child(tab);
         }
 
+        let (confirm_title, confirm_body) = match &confirm_action {
+            Some(ConfirmAction::Move { src, dst }) => (
+                "确认移动".to_string(),
+                div()
+                    .flex()
+                    .flex_col()
+                    .child("将")
+                    .child(
+                        div()
+                            .mt(px(4.0))
+                            .text_color(rgb(0xffe6e0d9))
+                            .child(src.to_string_lossy().to_string()),
+                    )
+                    .child(div().mt(px(6.0)).child("移动到"))
+                    .child(
+                        div()
+                            .mt(px(4.0))
+                            .text_color(rgb(0xffe6e0d9))
+                            .child(dst.to_string_lossy().to_string()),
+                    )
+                    .into_any_element(),
+            ),
+            Some(ConfirmAction::Delete { path, is_dir }) => (
+                "确认删除".to_string(),
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(format!(
+                        "确定删除{}：",
+                        if *is_dir { "文件夹" } else { "文件" }
+                    ))
+                    .child(
+                        div()
+                            .mt(px(6.0))
+                            .text_color(rgb(0xffe6e0d9))
+                            .child(path.to_string_lossy().to_string()),
+                    )
+                    .into_any_element(),
+            ),
+            None => ("确认".to_string(), div().into_any_element()),
+        };
+
         div()
+            .relative()
             .bg(rgb(0xFFFFFFFF))
             .flex()
             .flex_col()
             .w_full()
             .h_full()
-            .on_drop(move |paths: &ExternalPaths, _, cx| {
+            .on_drag_move(cx.listener(|this, event: &DragMoveEvent<ExternalPaths>, _window, cx| {
+                let paths = event.drag(cx).paths();
+                this.external_drag_position = event.event.position;
+                this.external_drag_primary = paths.first().cloned();
+                this.external_drag_count = paths.len();
+                this.external_drag_is_dir = paths.first().map(|p| p.is_dir()).unwrap_or(false);
+                cx.notify();
+            }))
+            .on_drop(cx.listener(move |this, paths: &ExternalPaths, _window, cx| {
+                this.external_drag_primary = None;
+                this.external_drag_count = 0;
+                this.external_drag_is_dir = false;
                 if let Some(path) = paths.paths().first() {
                      if path.is_dir() {
                          println!("Dropping folder: {:?}", path);
@@ -270,7 +501,8 @@ impl Render for StartWindow {
                          });
                      }
                 }
-            })
+                cx.notify();
+            }))
             .child(
                 div()
                     .w_full()
@@ -346,6 +578,127 @@ impl Render for StartWindow {
                     div().into_any_element()
                 }
             )
+            .child(
+                modal()
+                    .open(confirm_open)
+                    .title(confirm_title)
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(rgb(0xffe6e0d9))
+                            .child(confirm_body),
+                    )
+                    .footer(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .child(
+                                div()
+                                    .px(px(12.0))
+                                    .py(px(6.0))
+                                    .rounded_md()
+                                    .bg(rgb(0xff3c474d))
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(0xffe6e0d9))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgba(0xffffff12)))
+                                    .mr(px(8.0))
+                                    .child("取消")
+                                    .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                                        view_for_cancel.update(cx, |this, cx| {
+                                            this.cancel_confirm(cx);
+                                        });
+                                    }),
+                            )
+                            .child({
+                                let view_for_confirm = view.clone();
+                                div()
+                                    .px(px(12.0))
+                                    .py(px(6.0))
+                                    .rounded_md()
+                                    .bg(rgb(0xff2d6cdf))
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(0xffffffff))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(0xff3b7bff)))
+                                    .child("确定")
+                                    .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                                        view_for_confirm.update(cx, |this, cx| {
+                                            this.apply_confirm(cx);
+                                        });
+                                    })
+                            }),
+                    )
+                    .on_dismiss(move |_window, cx| {
+                        view_for_dismiss.update(cx, |this, cx| {
+                            this.cancel_confirm(cx);
+                        });
+                    }),
+            )
+            .child(if show_external_drag {
+                let name = external_drag_primary
+                    .as_ref()
+                    .and_then(|path| path.file_name())
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "文件".to_string());
+                let title = if external_drag_is_dir {
+                    "松开打开文件夹"
+                } else {
+                    "仅支持拖拽文件夹"
+                };
+                let subtitle = if external_drag_count > 1 {
+                    format!("{} 个项目", external_drag_count)
+                } else {
+                    name
+                };
+                let icon = if external_drag_is_dir {
+                    tie_svg()
+                        .path("assets/icons/folder_dark.svg")
+                        .size(px(36.0))
+                        .original_colors(true)
+                        .into_any_element()
+                } else {
+                    tie_svg()
+                        .path("assets/icons/anyType_dark.svg")
+                        .size(px(36.0))
+                        .original_colors(true)
+                        .into_any_element()
+                };
+                div()
+                    .absolute()
+                    .top(external_drag_position.y + px(12.0))
+                    .left(external_drag_position.x + px(12.0))
+                    .bg(rgba(0x1f2428e6))
+                    .border_1()
+                    .border_color(rgba(0xffffff24))
+                    .rounded_md()
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .flex()
+                    .items_center()
+                    .child(div().mr(px(8.0)).child(icon))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(0xffe6e0d9))
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(2.0))
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(0xffa9b1b6))
+                                    .child(subtitle),
+                            ),
+                    )
+                    .into_any_element()
+            } else {
+                div().into_any_element()
+            })
             /*
             .child(
                 modal()
@@ -486,6 +839,33 @@ impl Render for StartWindow {
                                             this.context_menu_path = None;
                                             cx.notify();
                                         });
+                                    })
+                            })
+                            .child({
+                                let view = view_for_menu.clone();
+                                let path = context_menu_path.clone();
+                                div()
+                                    .cursor_pointer()
+                                    .p(px(6.0))
+                                    .text_size(px(13.0))
+                                    .text_color(rgb(0xffe6e0d9))
+                                    .hover(|s| s.bg(rgba(0xffffff12)))
+                                    .child("删除")
+                                    .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                                        if let Some(path) = path.clone() {
+                                            view.update(cx, |this, cx| {
+                                                this.request_confirm(
+                                                    ConfirmAction::Delete {
+                                                        path: path.clone(),
+                                                        is_dir: context_menu_is_dir,
+                                                    },
+                                                    cx,
+                                                );
+                                                this.context_menu_open = false;
+                                                this.context_menu_path = None;
+                                                cx.notify();
+                                            });
+                                        }
                                     })
                             }),
                     )

@@ -1,6 +1,6 @@
 use super::tie_svg::tie_svg;
 use gpui::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -14,8 +14,30 @@ pub struct FileEntry {
     pub is_expanded: bool,
 }
 
+#[derive(Clone)]
+struct InlineNewItem {
+    anchor_path: PathBuf,
+    anchor_is_dir: bool,
+    name: String,
+    is_dir: bool,
+    depth: usize,
+    insert_index: usize,
+    editing: bool,
+}
+
+#[derive(Clone)]
+struct VirtualNode {
+    name: String,
+    is_dir: bool,
+}
+
 pub enum FileTreeEvent {
     OpenFile(PathBuf),
+    ContextMenu {
+        position: Point<Pixels>,
+        path: PathBuf,
+        is_dir: bool,
+    },
 }
 
 pub struct FileTree {
@@ -32,6 +54,8 @@ pub struct FileTree {
     selected_path: Option<PathBuf>,
     selection_time: Option<Instant>,
     animating: bool,
+    pending_new_item: Option<InlineNewItem>,
+    virtual_nodes: HashMap<PathBuf, Vec<VirtualNode>>,
 }
 
 impl EventEmitter<FileTreeEvent> for FileTree {}
@@ -52,6 +76,8 @@ impl FileTree {
             selected_path: None,
             selection_time: None,
             animating: false,
+            pending_new_item: None,
+            virtual_nodes: HashMap::new(),
         };
         tree.refresh();
         tree
@@ -60,7 +86,19 @@ impl FileTree {
     pub fn refresh(&mut self) {
         self.visible_entries.clear();
         self.append_entries(&self.root_path.clone(), 0);
-        self.list_state.reset(self.visible_entries.len());
+        if self.pending_new_item.is_some() {
+            let (insert_index, depth) = {
+                let pending = self.pending_new_item.as_ref().expect("checked above");
+                self.inline_insert_position(&pending.anchor_path, pending.anchor_is_dir)
+            };
+            if let Some(pending) = self.pending_new_item.as_mut() {
+                pending.insert_index = insert_index;
+                pending.depth = depth;
+            }
+            self.list_state.reset(self.visible_entries.len() + 1);
+        } else {
+            self.list_state.reset(self.visible_entries.len());
+        }
     }
 
     pub fn set_root_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -70,38 +108,199 @@ impl FileTree {
         cx.notify();
     }
 
+    pub fn toggle_dir(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.toggle_expand(path, cx);
+    }
+
+    pub fn begin_inline_create(
+        &mut self,
+        anchor_path: PathBuf,
+        anchor_is_dir: bool,
+        create_dir: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.remove_inline_item();
+        if anchor_is_dir && !self.expanded_paths.contains(&anchor_path) {
+            self.expanded_paths.insert(anchor_path.clone());
+            self.refresh();
+        }
+
+        let (insert_index, depth) = self.inline_insert_position(&anchor_path, anchor_is_dir);
+        self.pending_new_item = Some(InlineNewItem {
+            anchor_path,
+            anchor_is_dir,
+            name: String::new(),
+            is_dir: create_dir,
+            depth,
+            insert_index,
+            editing: true,
+        });
+        self.list_state.splice(insert_index..insert_index, 1);
+        cx.notify();
+    }
+
+    pub fn focus(&self, window: &mut Window) {
+        self.focus_handle.focus(window);
+    }
+
+    fn inline_insert_position(&self, anchor_path: &Path, anchor_is_dir: bool) -> (usize, usize) {
+        if let Some((index, entry)) = self
+            .visible_entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.path == anchor_path)
+        {
+            let depth = if anchor_is_dir {
+                entry.depth + 1
+            } else {
+                entry.depth
+            };
+            return (index + 1, depth);
+        }
+        (self.visible_entries.len(), 0)
+    }
+
+    fn remove_inline_item(&mut self) {
+        if let Some(pending) = self.pending_new_item.take() {
+            self.list_state
+                .splice(pending.insert_index..pending.insert_index + 1, 0);
+        }
+    }
+
+    fn cancel_inline_item(&mut self, cx: &mut Context<Self>) {
+        self.remove_inline_item();
+        cx.notify();
+    }
+
+    fn commit_inline_item(&mut self, cx: &mut Context<Self>) {
+        let pending = match self.pending_new_item.take() {
+            Some(pending) => pending,
+            None => return,
+        };
+
+        self.list_state
+            .splice(pending.insert_index..pending.insert_index + 1, 0);
+
+        let name = pending.name.trim().to_string();
+        if name.is_empty() {
+            cx.notify();
+            return;
+        }
+
+        let parent = if pending.anchor_is_dir {
+            pending.anchor_path
+        } else {
+            pending
+                .anchor_path
+                .parent()
+                .unwrap_or(&self.root_path)
+                .to_path_buf()
+        };
+
+        let segments: Vec<String> = name
+            .split(|c| c == '/' || c == '\\')
+            .filter(|part| !part.is_empty())
+            .map(|part| part.to_string())
+            .collect();
+        if segments.is_empty() {
+            cx.notify();
+            return;
+        }
+
+        let mut current_parent = parent.clone();
+        if pending.is_dir {
+            for segment in segments {
+                let child_path = current_parent.join(&segment);
+                self.add_virtual_node(current_parent.clone(), segment, true);
+                self.expanded_paths.insert(current_parent.clone());
+                current_parent = child_path;
+            }
+            self.expanded_paths.insert(current_parent.clone());
+            self.selected_path = Some(current_parent);
+        } else {
+            let (dir_parts, file_part) = segments.split_at(segments.len() - 1);
+            for segment in dir_parts {
+                let child_path = current_parent.join(segment);
+                self.add_virtual_node(current_parent.clone(), segment.clone(), true);
+                self.expanded_paths.insert(current_parent.clone());
+                current_parent = child_path;
+            }
+            let file_name = file_part[0].clone();
+            self.add_virtual_node(current_parent.clone(), file_name.clone(), false);
+            self.expanded_paths.insert(current_parent.clone());
+            self.selected_path = Some(current_parent.join(file_name));
+        }
+
+        self.selection_time = Some(Instant::now());
+        self.refresh();
+        cx.notify();
+    }
+
+    fn backspace_inline_item(&mut self, cx: &mut Context<Self>) {
+        if let Some(pending) = self.pending_new_item.as_mut() {
+            if !pending.editing || pending.name.is_empty() {
+                return;
+            }
+            let prev = prev_char_boundary(&pending.name, pending.name.len());
+            pending.name.truncate(prev);
+            cx.notify();
+        }
+    }
+
+    fn append_inline_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(pending) = self.pending_new_item.as_mut() {
+            if !pending.editing {
+                return;
+            }
+            pending.name.push_str(text);
+            cx.notify();
+        }
+    }
+
     fn append_entries(&mut self, path: &Path, depth: usize) {
+        let mut children: Vec<(PathBuf, String, bool)> = Vec::new();
+
         if let Ok(entries) = fs::read_dir(path) {
-            let mut entries_vec: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-
-            // Sort: Directories first, then files
-            entries_vec.sort_by(|a, b| {
-                let a_is_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                let b_is_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                if a_is_dir == b_is_dir {
-                    a.file_name().cmp(&b.file_name())
-                } else {
-                    b_is_dir.cmp(&a_is_dir)
-                }
-            });
-
-            for entry in entries_vec {
-                let path = entry.path();
+            for entry in entries.filter_map(|e| e.ok()) {
+                let child_path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
                 let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                let is_expanded = self.expanded_paths.contains(&path);
+                children.push((child_path, name, is_dir));
+            }
+        }
 
-                self.visible_entries.push(FileEntry {
-                    path: path.clone(),
-                    name,
-                    is_dir,
-                    depth,
-                    is_expanded,
-                });
+        if let Some(virtuals) = self.virtual_nodes.get(path) {
+            for virtual_node in virtuals {
+                let child_path = path.join(&virtual_node.name);
+                children.push((child_path, virtual_node.name.clone(), virtual_node.is_dir));
+            }
+        }
 
-                if is_dir && is_expanded {
-                    self.append_entries(&path, depth + 1);
-                }
+        // Sort: Directories first, then files
+        children.sort_by(|a, b| {
+            if a.2 == b.2 {
+                a.1.cmp(&b.1)
+            } else {
+                b.2.cmp(&a.2)
+            }
+        });
+
+        for (child_path, name, is_dir) in children {
+            let is_expanded = self.expanded_paths.contains(&child_path);
+
+            self.visible_entries.push(FileEntry {
+                path: child_path.clone(),
+                name,
+                is_dir,
+                depth,
+                is_expanded,
+            });
+
+            if is_dir && is_expanded {
+                self.append_entries(&child_path, depth + 1);
             }
         }
     }
@@ -185,6 +384,63 @@ impl FileTree {
         }
         false
     }
+
+    fn add_virtual_node(&mut self, parent: PathBuf, name: String, is_dir: bool) {
+        let entry = self.virtual_nodes.entry(parent).or_insert_with(Vec::new);
+        if entry
+            .iter()
+            .any(|node| node.name == name && node.is_dir == is_dir)
+        {
+            return;
+        }
+        entry.push(VirtualNode { name, is_dir });
+    }
+
+    fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let editing = self
+            .pending_new_item
+            .as_ref()
+            .map(|item| item.editing)
+            .unwrap_or(false);
+        if !editing {
+            return;
+        }
+
+        let key = event.keystroke.key.as_str();
+        match key {
+            "enter" => {
+                self.commit_inline_item(cx);
+                cx.stop_propagation();
+                return;
+            }
+            "escape" => {
+                self.cancel_inline_item(cx);
+                cx.stop_propagation();
+                return;
+            }
+            "backspace" | "delete" => {
+                self.backspace_inline_item(cx);
+                cx.stop_propagation();
+                return;
+            }
+            _ => {}
+        }
+
+        let modifiers = event.keystroke.modifiers;
+        if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
+            return;
+        }
+
+        if let Some(text) = event.keystroke.key_char.as_ref() {
+            if !text.chars().all(|c| c.is_control()) {
+                self.append_inline_text(text, cx);
+                cx.stop_propagation();
+            }
+        } else if key == "space" {
+            self.append_inline_text(" ", cx);
+            cx.stop_propagation();
+        }
+    }
 }
 
 impl Render for FileTree {
@@ -193,6 +449,7 @@ impl Render for FileTree {
         let drop_highlight = rgb(0xff3c474d);
         let visible_entries = self.visible_entries.clone();
         let drag_hover = self.drag_hover.clone();
+        let pending_new_item = self.pending_new_item.clone();
         let view = cx.entity().clone();
 
         let view_mousemove = view.clone();
@@ -200,15 +457,44 @@ impl Render for FileTree {
         let root_path = self.root_path.clone();
         let selected_path = self.selected_path.clone();
         let selection_time = self.selection_time;
+        let selected_parent_path = selected_path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(|path| path.to_path_buf())
+            .filter(|path| *path != root_path);
+        let selected_parent_depth = selected_parent_path
+            .as_ref()
+            .and_then(|path| path.strip_prefix(&root_path).ok())
+            .and_then(|relative| {
+                let count = relative.components().count();
+                if count == 0 {
+                    None
+                } else {
+                    Some(count - 1)
+                }
+            });
+        let pending_index = pending_new_item.as_ref().map(|item| item.insert_index);
         let selected_row_index = selected_path
             .as_ref()
-            .and_then(|path| visible_entries.iter().position(|e| &e.path == path));
+            .and_then(|path| visible_entries.iter().position(|e| &e.path == path))
+            .map(|index| {
+                if let Some(pending_index) = pending_index {
+                    if index >= pending_index {
+                        index + 1
+                    } else {
+                        index
+                    }
+                } else {
+                    index
+                }
+            });
 
         div()
             .w_full()
             .h_full()
             .bg(theme_surface)
             .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_move(move |e: &MouseMoveEvent, _window, cx| {
                 view_mousemove.update(cx, |this, cx| {
                     this.mouse_position = e.position;
@@ -219,11 +505,100 @@ impl Render for FileTree {
             })
             .child(
                 list(self.list_state.clone(), move |ix, _window, _cx| {
-                    if ix >= visible_entries.len() {
+                    let total_len =
+                        visible_entries.len() + pending_new_item.as_ref().map(|_| 1).unwrap_or(0);
+                    if ix >= total_len {
                         return div().id("empty").into_any_element();
                     }
 
-                    let entry = &visible_entries[ix];
+                    if let Some(pending) = pending_new_item.as_ref() {
+                        if ix == pending.insert_index {
+                            let theme_text = rgb(0xffcccccc);
+                            let placeholder_color = rgb(0xff8b949e);
+                            let theme_selected = rgb(0xff37373d);
+                            let placeholder = if pending.is_dir {
+                                "新建文件夹"
+                            } else {
+                                "新建文件"
+                            };
+                            let display_text = if pending.name.is_empty() {
+                                placeholder.to_string()
+                            } else {
+                                pending.name.clone()
+                            };
+                            let text_color = if pending.name.is_empty() {
+                                placeholder_color
+                            } else {
+                                theme_text
+                            };
+                            let icon = if pending.is_dir {
+                                folder_icon().into_any_element()
+                            } else {
+                                file_icon(&pending.name).into_any_element()
+                            };
+
+                            let mut row = div()
+                                .id(SharedString::from(format!(
+                                    "inline-new-{}",
+                                    pending.insert_index
+                                )))
+                                .relative()
+                                .flex()
+                                .items_center()
+                                .h(px(24.0))
+                                .pl(px(10.0 + pending.depth as f32 * 10.0))
+                                .bg(if pending.editing {
+                                    theme_selected
+                                } else {
+                                    theme_surface
+                                });
+
+                            for i in 0..pending.depth {
+                                row = row.child(
+                                    div()
+                                        .absolute()
+                                        .left(px(10.0 + i as f32 * 10.0))
+                                        .top(px(0.0))
+                                        .w(px(1.0))
+                                        .h_full()
+                                        .bg(rgb(0x303030)),
+                                );
+                            }
+
+                            row = row.child(div().mr(px(6.0)).child(icon)).child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .text_size(px(13.0))
+                                    .text_color(text_color)
+                                    .child(display_text)
+                                    .child(if pending.editing {
+                                        div()
+                                            .ml(px(2.0))
+                                            .w(px(1.0))
+                                            .h(px(14.0))
+                                            .bg(theme_text)
+                                            .into_any_element()
+                                    } else {
+                                        div().into_any_element()
+                                    }),
+                            );
+
+                            return row.into_any_element();
+                        }
+                    }
+
+                    let entry_index = if let Some(pending_index) = pending_index {
+                        if ix > pending_index {
+                            ix - 1
+                        } else {
+                            ix
+                        }
+                    } else {
+                        ix
+                    };
+
+                    let entry = &visible_entries[entry_index];
                     let path = entry.path.clone();
                     let is_dir = entry.is_dir;
                     let depth = entry.depth;
@@ -245,9 +620,11 @@ impl Render for FileTree {
                     let view_down = view.clone();
                     let view_move = view.clone();
                     let view_up = view.clone();
+                    let view_right = view.clone();
                     let path_click = path_clone.clone();
                     let path_down = path_clone.clone();
                     let path_move = path_clone.clone();
+                    let path_right = path_clone.clone();
 
                     let mut row = div()
                         .id(SharedString::from(path.to_string_lossy().to_string()))
@@ -268,17 +645,12 @@ impl Render for FileTree {
                     }
 
                     // Indentation Guides
-                    let relative_path = path.strip_prefix(&root_path).ok();
-                    let relative_selected = selected_path
-                        .as_ref()
-                        .and_then(|p| p.strip_prefix(&root_path).ok());
-
                     for i in 0..depth {
                         let mut is_active = false;
-                        if let (Some(rp), Some(rsp)) = (relative_path, relative_selected) {
-                            let rp_comps: Vec<_> = rp.components().take(i + 1).collect();
-                            let rsp_comps: Vec<_> = rsp.components().take(i + 1).collect();
-                            if rp_comps == rsp_comps {
+                        if let (Some(parent_path), Some(parent_depth)) =
+                            (&selected_parent_path, selected_parent_depth)
+                        {
+                            if i == parent_depth && path.starts_with(parent_path) {
                                 is_active = true;
                             }
                         }
@@ -333,6 +705,20 @@ impl Render for FileTree {
                                 this.drag_start_position = Some(e.position);
                                 this.drag_active = false;
                                 this.drag_hover = None;
+                                cx.notify();
+                            });
+                        })
+                        .on_mouse_down(MouseButton::Right, move |e, _window, cx| {
+                            view_right.update(cx, |this, cx| {
+                                println!("FileTree right-click position: {:?}", e.position);
+                                this.selected_path = Some(path_right.clone());
+                                this.selection_time = Some(Instant::now());
+                                this.ensure_animation(cx);
+                                cx.emit(FileTreeEvent::ContextMenu {
+                                    position: e.position,
+                                    path: path_right.clone(),
+                                    is_dir,
+                                });
                                 cx.notify();
                             });
                         })
@@ -453,14 +839,14 @@ fn folder_icon() -> impl IntoElement {
     tie_svg()
         .path("assets/icons/folder_dark.svg")
         .size(px(16.0))
-        .text_color(rgb(0x90a4ae)) // Material Icon Theme default folder color
+        .original_colors(true)
 }
 
 fn folder_open_icon() -> impl IntoElement {
     tie_svg()
         .path("assets/icons/folder_dark.svg") // No open variant in list
         .size(px(16.0))
-        .text_color(rgb(0x90a4ae))
+        .original_colors(true)
 }
 
 pub fn file_icon(name: &str) -> impl IntoElement {
@@ -468,4 +854,15 @@ pub fn file_icon(name: &str) -> impl IntoElement {
         .path(get_icon_path(name))
         .size(px(16.0))
         .original_colors(true)
+}
+
+fn prev_char_boundary(text: &str, index: usize) -> usize {
+    if index == 0 {
+        return 0;
+    }
+    let mut i = index.saturating_sub(1);
+    while i > 0 && !text.is_char_boundary(i) {
+        i = i.saturating_sub(1);
+    }
+    i
 }

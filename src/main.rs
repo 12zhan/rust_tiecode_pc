@@ -7,6 +7,7 @@ pub mod lsp;
 use component::{
     file_tree::{file_icon, FileTree, FileTreeEvent},
     modal::modal,
+    popover::popover,
     ComponentLibrary,
     ComponentLibraryEvent,
     InputBackspace,
@@ -150,6 +151,13 @@ fn main() {
                                     });
                                 }
                             }
+                            FileTreeEvent::ContextMenu { position, path, is_dir } => {
+                                this.context_menu_open = true;
+                                this.context_menu_position = *position;
+                                this.context_menu_path = Some(path.clone());
+                                this.context_menu_is_dir = *is_dir;
+                                cx.notify();
+                            }
                         }
                     });
 
@@ -182,6 +190,10 @@ fn main() {
                         component_library,
                         file_tree,
                         show_modal: false,
+                        context_menu_open: false,
+                        context_menu_position: point(px(0.0), px(0.0)),
+                        context_menu_path: None,
+                        context_menu_is_dir: false,
                         _subscriptions: vec![
                             subscription,
                             editor_subscription,
@@ -199,6 +211,10 @@ struct StartWindow {
     component_library: Entity<ComponentLibrary>,
     file_tree: Entity<FileTree>,
     show_modal: bool,
+    context_menu_open: bool,
+    context_menu_position: Point<Pixels>,
+    context_menu_path: Option<PathBuf>,
+    context_menu_is_dir: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -207,9 +223,15 @@ impl Render for StartWindow {
         let view = cx.entity();
         let file_tree_view = self.file_tree.read(cx);
         let file_tree = self.file_tree.clone();
+        let file_tree_for_drop = file_tree.clone();
         let is_dragging = file_tree_view.is_dragging();
         let drag_source = file_tree_view.drag_source();
         let mouse_position = file_tree_view.mouse_position();
+        let context_menu_path = self.context_menu_path.clone();
+        let context_menu_is_dir = self.context_menu_is_dir;
+        let context_menu_position = self.context_menu_position;
+        let view_for_modal = view.clone();
+        let view_for_menu = view.clone();
 
         div()
             .bg(rgb(0xFFFFFFFF))
@@ -221,7 +243,7 @@ impl Render for StartWindow {
                 if let Some(path) = paths.paths().first() {
                      if path.is_dir() {
                          println!("Dropping folder: {:?}", path);
-                         file_tree.update(cx, |tree, cx| {
+                         file_tree_for_drop.update(cx, |tree, cx| {
                              tree.set_root_path(path.clone(), cx);
                          });
                      }
@@ -306,8 +328,140 @@ impl Render for StartWindow {
                             .child("点击了按钮，弹窗已打开"),
                     )
                     .on_dismiss(move |_window, cx| {
-                        view.update(cx, |this, cx| {
+                        view_for_modal.update(cx, |this, cx| {
                             this.show_modal = false;
+                            cx.notify();
+                        });
+                    }),
+            )
+            .child(
+                popover()
+                    .open(self.context_menu_open)
+                    .position(context_menu_position)
+                    .w(px(180.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child({
+                                let view = view_for_menu.clone();
+                                let file_tree = file_tree.clone();
+                                let path = context_menu_path.clone();
+                                let label = if context_menu_is_dir { "展开/折叠" } else { "打开" };
+                                div()
+                                    .cursor_pointer()
+                                    .p(px(6.0))
+                                    .text_size(px(13.0))
+                                    .text_color(rgb(0xffe6e0d9))
+                                    .hover(|s| s.bg(rgba(0xffffff12)))
+                                    .child(label)
+                                    .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                                        if let Some(path) = path.clone() {
+                                            if context_menu_is_dir {
+                                                file_tree.update(cx, |tree, cx| {
+                                                    tree.toggle_dir(path.clone(), cx);
+                                                });
+                                            } else {
+                                                file_tree.update(cx, |_, cx| {
+                                                    cx.emit(FileTreeEvent::OpenFile(path.clone()));
+                                                });
+                                            }
+                                        }
+                                        view.update(cx, |this, cx| {
+                                            this.context_menu_open = false;
+                                            this.context_menu_path = None;
+                                            cx.notify();
+                                        });
+                                    })
+                            })
+                            .child({
+                                let view = view_for_menu.clone();
+                                let file_tree = file_tree.clone();
+                                let path = context_menu_path.clone();
+                                div()
+                                    .cursor_pointer()
+                                    .p(px(6.0))
+                                    .text_size(px(13.0))
+                                    .text_color(rgb(0xffe6e0d9))
+                                    .hover(|s| s.bg(rgba(0xffffff12)))
+                                    .child("新建文件")
+                                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                        if let Some(path) = path.clone() {
+                                            file_tree.update(cx, |tree, cx| {
+                                                tree.begin_inline_create(
+                                                    path.clone(),
+                                                    context_menu_is_dir,
+                                                    false,
+                                                    cx,
+                                                );
+                                            });
+                                            file_tree.read(cx).focus(window);
+                                        }
+                                        view.update(cx, |this, cx| {
+                                            this.context_menu_open = false;
+                                            this.context_menu_path = None;
+                                            cx.notify();
+                                        });
+                                    })
+                            })
+                            .child({
+                                let view = view_for_menu.clone();
+                                let file_tree = file_tree.clone();
+                                let path = context_menu_path.clone();
+                                div()
+                                    .cursor_pointer()
+                                    .p(px(6.0))
+                                    .text_size(px(13.0))
+                                    .text_color(rgb(0xffe6e0d9))
+                                    .hover(|s| s.bg(rgba(0xffffff12)))
+                                    .child("新建文件夹")
+                                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                        if let Some(path) = path.clone() {
+                                            file_tree.update(cx, |tree, cx| {
+                                                tree.begin_inline_create(
+                                                    path.clone(),
+                                                    context_menu_is_dir,
+                                                    true,
+                                                    cx,
+                                                );
+                                            });
+                                            file_tree.read(cx).focus(window);
+                                        }
+                                        view.update(cx, |this, cx| {
+                                            this.context_menu_open = false;
+                                            this.context_menu_path = None;
+                                            cx.notify();
+                                        });
+                                    })
+                            })
+                            .child({
+                                let view = view_for_menu.clone();
+                                let path = context_menu_path.clone();
+                                div()
+                                    .cursor_pointer()
+                                    .p(px(6.0))
+                                    .text_size(px(13.0))
+                                    .text_color(rgb(0xffe6e0d9))
+                                    .hover(|s| s.bg(rgba(0xffffff12)))
+                                    .child("复制路径")
+                                    .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                                        if let Some(path) = path.clone() {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                path.to_string_lossy().to_string(),
+                                            ));
+                                        }
+                                        view.update(cx, |this, cx| {
+                                            this.context_menu_open = false;
+                                            this.context_menu_path = None;
+                                            cx.notify();
+                                        });
+                                    })
+                            }),
+                    )
+                    .on_dismiss(move |_window, cx| {
+                        view_for_menu.update(cx, |this, cx| {
+                            this.context_menu_open = false;
+                            this.context_menu_path = None;
                             cx.notify();
                         });
                     }),

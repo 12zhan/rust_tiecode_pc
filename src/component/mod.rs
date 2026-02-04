@@ -1,6 +1,8 @@
 use gpui::*;
 pub mod file_tree;
+pub mod measure_bounds;
 pub mod modal;
+pub mod popover;
 pub mod tie_svg;
 use std::ops::Range;
 use std::time::{Duration, Instant};

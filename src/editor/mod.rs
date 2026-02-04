@@ -19,7 +19,22 @@ pub mod undo;
 #[cfg(test)]
 mod tests;
 
-use crate::editor::grammar::{CPP_GRAMMAR, JIESHENG_GRAMMAR};
+use crate::editor::grammar::{
+    CPP_GRAMMAR,
+    CMAKE_GRAMMAR,
+    CSS_GRAMMAR,
+    HTML_GRAMMAR,
+    JAVASCRIPT_GRAMMAR,
+    JIESHENG_GRAMMAR,
+    JSON_GRAMMAR,
+    MARKDOWN_GRAMMAR,
+    PYTHON_GRAMMAR,
+    RUST_GRAMMAR,
+    SHELL_GRAMMAR,
+    TOML_GRAMMAR,
+    TYPESCRIPT_GRAMMAR,
+    YAML_GRAMMAR,
+};
 use crate::editor::lsp_integration::{LspManager, default_doc_uri};
 
 use self::completion::{CompletionItem, CompletionKind};
@@ -134,6 +149,42 @@ impl CodeEditor {
         engine
             .compile_json(CPP_GRAMMAR)
             .expect("Failed to compile CPP grammar");
+        engine
+            .compile_json(RUST_GRAMMAR)
+            .expect("Failed to compile Rust grammar");
+        engine
+            .compile_json(JSON_GRAMMAR)
+            .expect("Failed to compile JSON grammar");
+        engine
+            .compile_json(CMAKE_GRAMMAR)
+            .expect("Failed to compile CMake grammar");
+        engine
+            .compile_json(TOML_GRAMMAR)
+            .expect("Failed to compile TOML grammar");
+        engine
+            .compile_json(YAML_GRAMMAR)
+            .expect("Failed to compile YAML grammar");
+        engine
+            .compile_json(PYTHON_GRAMMAR)
+            .expect("Failed to compile Python grammar");
+        engine
+            .compile_json(JAVASCRIPT_GRAMMAR)
+            .expect("Failed to compile JavaScript grammar");
+        engine
+            .compile_json(TYPESCRIPT_GRAMMAR)
+            .expect("Failed to compile TypeScript grammar");
+        engine
+            .compile_json(HTML_GRAMMAR)
+            .expect("Failed to compile HTML grammar");
+        engine
+            .compile_json(CSS_GRAMMAR)
+            .expect("Failed to compile CSS grammar");
+        engine
+            .compile_json(MARKDOWN_GRAMMAR)
+            .expect("Failed to compile Markdown grammar");
+        engine
+            .compile_json(SHELL_GRAMMAR)
+            .expect("Failed to compile Shell grammar");
         engine
             .compile_json(JIESHENG_GRAMMAR)
             .expect("Failed to compile 结绳 grammar");

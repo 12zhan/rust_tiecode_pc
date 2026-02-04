@@ -79,13 +79,38 @@ impl FileTree {
             pending_new_item: None,
             virtual_nodes: HashMap::new(),
         };
-        tree.refresh();
+        tree.refresh_internal(false);
         tree
     }
 
     pub fn refresh(&mut self) {
+        self.refresh_internal(true);
+    }
+
+    fn refresh_internal(&mut self, preserve_scroll: bool) {
+        let scroll_top = if preserve_scroll {
+            Some(self.list_state.logical_scroll_top())
+        } else {
+            None
+        };
+
         self.visible_entries.clear();
-        self.append_entries(&self.root_path.clone(), 0);
+        let root_name = self
+            .root_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| self.root_path.to_string_lossy().to_string());
+        let root_expanded = self.expanded_paths.contains(&self.root_path);
+        self.visible_entries.push(FileEntry {
+            path: self.root_path.clone(),
+            name: root_name,
+            is_dir: true,
+            depth: 0,
+            is_expanded: root_expanded,
+        });
+        if root_expanded {
+            self.append_entries(&self.root_path.clone(), 1);
+        }
         if self.pending_new_item.is_some() {
             let (insert_index, depth) = {
                 let pending = self.pending_new_item.as_ref().expect("checked above");
@@ -99,12 +124,16 @@ impl FileTree {
         } else {
             self.list_state.reset(self.visible_entries.len());
         }
+
+        if let Some(scroll_top) = scroll_top {
+            self.list_state.scroll_to(scroll_top);
+        }
     }
 
     pub fn set_root_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.root_path = path;
         self.expanded_paths.clear();
-        self.refresh();
+        self.refresh_internal(false);
         cx.notify();
     }
 
@@ -122,7 +151,7 @@ impl FileTree {
         self.remove_inline_item();
         if anchor_is_dir && !self.expanded_paths.contains(&anchor_path) {
             self.expanded_paths.insert(anchor_path.clone());
-            self.refresh();
+            self.refresh_internal(true);
         }
 
         let (insert_index, depth) = self.inline_insert_position(&anchor_path, anchor_is_dir);
@@ -232,7 +261,7 @@ impl FileTree {
         }
 
         self.selection_time = Some(Instant::now());
-        self.refresh();
+        self.refresh_internal(true);
         cx.notify();
     }
 
@@ -366,7 +395,7 @@ impl FileTree {
         } else {
             self.expanded_paths.insert(path);
         }
-        self.refresh();
+        self.refresh_internal(true);
         cx.notify();
     }
 
@@ -460,19 +489,11 @@ impl Render for FileTree {
         let selected_parent_path = selected_path
             .as_ref()
             .and_then(|path| path.parent())
-            .map(|path| path.to_path_buf())
-            .filter(|path| *path != root_path);
+            .map(|path| path.to_path_buf());
         let selected_parent_depth = selected_parent_path
             .as_ref()
             .and_then(|path| path.strip_prefix(&root_path).ok())
-            .and_then(|relative| {
-                let count = relative.components().count();
-                if count == 0 {
-                    None
-                } else {
-                    Some(count - 1)
-                }
-            });
+            .map(|relative| relative.components().count());
         let pending_index = pending_new_item.as_ref().map(|item| item.insert_index);
         let selected_row_index = selected_path
             .as_ref()

@@ -6,15 +6,7 @@ pub mod lsp;
 
 use component::{
     file_tree::{file_icon, FileTree, FileTreeEvent},
-    modal::modal,
     popover::popover,
-    ComponentLibrary,
-    ComponentLibraryEvent,
-    InputBackspace,
-    InputDelete,
-    InputLeft,
-    InputRight,
-    InputSelectAll,
 };
 use editor::{
     Backspace, CodeEditor, CodeEditorEvent, Copy, CtrlShiftTab, Cut, Delete, DeleteLine, Down, Enter, Escape,
@@ -84,10 +76,6 @@ fn main() {
             KeyBinding::new("f12", GoToDefinition, Some("CodeEditor")),
             KeyBinding::new(&format!("{}-shift-space", ctrl_cmd), SignatureHelp, Some("CodeEditor")),
             KeyBinding::new("shift-alt-f", FormatDocument, Some("CodeEditor")),
-            KeyBinding::new("backspace", InputBackspace, Some("ComponentLibrary")),
-            KeyBinding::new("delete", InputDelete, Some("ComponentLibrary")),
-            KeyBinding::new("left", InputLeft, Some("ComponentLibrary")),
-            KeyBinding::new("right", InputRight, Some("ComponentLibrary")),
         ];
 
         // 3. 动态拼接并添加带修饰键的绑定
@@ -109,11 +97,6 @@ fn main() {
             KeyBinding::new(&format!("{}-shift-z", ctrl_cmd), Redo, Some("CodeEditor")),
             KeyBinding::new(&format!("{}-f", ctrl_cmd), ToggleFind, Some("CodeEditor")),
             KeyBinding::new(&format!("{}-a", ctrl_cmd), SelectAll, Some("CodeEditor")),
-            KeyBinding::new(
-                &format!("{}-a", ctrl_cmd),
-                InputSelectAll,
-                Some("ComponentLibrary"),
-            ),
         ]);
 
         // 4. 注册所有绑定
@@ -131,25 +114,20 @@ fn main() {
             },
             |_, cx| {
                 let editor = cx.new(CodeEditor::new);
-                editor.update(cx, |editor, cx| {
+                /* editor.update(cx, |editor, cx| {
                     if editor.core.content.len_bytes() != 0 {
                         return;
                     }
 
                     let sample = "类 启动类\n{\n    方法 启动方法()\n    {\n        变量 list: 列表<文本> = 新建 列表<文本>()\n        list.\n    }\n}\n";
                     editor.set_content(sample.to_string(), cx);
-                });
-                let component_library = cx.new(ComponentLibrary::new);
+                }); */
                 let file_tree = cx.new(|cx| FileTree::new(std::env::current_dir().unwrap_or(std::path::PathBuf::from(".")), cx));
                 cx.new(|cx| {
                     let subscription = cx.subscribe(&file_tree, |this: &mut StartWindow, _emitter, event: &FileTreeEvent, cx| {
                         match event {
                             FileTreeEvent::OpenFile(path) => {
-                                if let Ok(content) = std::fs::read_to_string(path) {
-                                    this.editor.update(cx, |editor, cx| {
-                                        editor.open_file(path.clone(), content, cx);
-                                    });
-                                }
+                                this.open_file_path(path.clone(), cx);
                             }
                             FileTreeEvent::ContextMenu { position, path, is_dir } => {
                                 this.context_menu_open = true;
@@ -164,32 +142,16 @@ fn main() {
                     let editor_subscription = cx.subscribe(&editor, |this: &mut StartWindow, _emitter, event: &CodeEditorEvent, cx| {
                         match event {
                             CodeEditorEvent::OpenFile(path) => {
-                                if let Ok(content) = std::fs::read_to_string(path) {
-                                    this.editor.update(cx, |editor, cx| {
-                                        editor.open_file(path.clone(), content, cx);
-                                    });
-                                }
+                                this.open_file_path(path.clone(), cx);
                             }
                         }
                     });
 
-                    let component_library_subscription = cx.subscribe(
-                        &component_library,
-                        |this: &mut StartWindow, _emitter, event: &ComponentLibraryEvent, cx| {
-                            match event {
-                                ComponentLibraryEvent::ButtonClicked => {
-                                    this.show_modal = true;
-                                    cx.notify();
-                                }
-                            }
-                        },
-                    );
-
                     StartWindow {
                         editor,
-                        component_library,
                         file_tree,
-                        show_modal: false,
+                        open_tabs: Vec::new(),
+                        active_tab: None,
                         context_menu_open: false,
                         context_menu_position: point(px(0.0), px(0.0)),
                         context_menu_path: None,
@@ -197,7 +159,6 @@ fn main() {
                         _subscriptions: vec![
                             subscription,
                             editor_subscription,
-                            component_library_subscription,
                         ],
                     }
                 })
@@ -208,14 +169,29 @@ fn main() {
 
 struct StartWindow {
     editor: Entity<CodeEditor>,
-    component_library: Entity<ComponentLibrary>,
     file_tree: Entity<FileTree>,
-    show_modal: bool,
+    open_tabs: Vec<PathBuf>,
+    active_tab: Option<PathBuf>,
     context_menu_open: bool,
     context_menu_position: Point<Pixels>,
     context_menu_path: Option<PathBuf>,
     context_menu_is_dir: bool,
     _subscriptions: Vec<Subscription>,
+}
+
+impl StartWindow {
+    fn open_file_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            self.editor.update(cx, |editor, cx| {
+                editor.open_file(path.clone(), content, cx);
+            });
+            if !self.open_tabs.iter().any(|p| p == &path) {
+                self.open_tabs.push(path.clone());
+            }
+            self.active_tab = Some(path);
+            cx.notify();
+        }
+    }
 }
 
 impl Render for StartWindow {
@@ -230,8 +206,54 @@ impl Render for StartWindow {
         let context_menu_path = self.context_menu_path.clone();
         let context_menu_is_dir = self.context_menu_is_dir;
         let context_menu_position = self.context_menu_position;
-        let view_for_modal = view.clone();
+        let open_tabs = self.open_tabs.clone();
+        let active_tab = self.active_tab.clone();
         let view_for_menu = view.clone();
+
+        let mut tabs_bar = div()
+            .w_full()
+            .h(px(28.0))
+            .flex()
+            .items_center()
+            .bg(rgb(0xff1f2428))
+            .border_b_1()
+            .border_color(rgb(0xff3c474d))
+            .px(px(6.0));
+
+        for path in open_tabs {
+            let label = path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.to_string_lossy().to_string());
+            let is_active = active_tab.as_ref().map(|p| p == &path).unwrap_or(false);
+            let view_for_tab = view.clone();
+            let path_clone = path.clone();
+            let tab = div()
+                .mr(px(4.0))
+                .px(px(10.0))
+                .py(px(4.0))
+                .rounded_md()
+                .cursor_pointer()
+                .text_size(px(12.0))
+                .text_color(if is_active {
+                    rgb(0xffe6e0d9)
+                } else {
+                    rgb(0xffa9b1b6)
+                })
+                .bg(if is_active {
+                    rgb(0xff2d353b)
+                } else {
+                    rgba(0x00000000)
+                })
+                .hover(|s| s.bg(rgba(0xffffff12)))
+                .child(label)
+                .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                    view_for_tab.update(cx, |this, cx| {
+                        this.open_file_path(path_clone.clone(), cx);
+                    });
+                });
+            tabs_bar = tabs_bar.child(tab);
+        }
 
         div()
             .bg(rgb(0xFFFFFFFF))
@@ -266,7 +288,6 @@ impl Render for StartWindow {
                             .window_control_area(WindowControlArea::Max),
                     ),
             )
-            .child(self.component_library.clone())
             .child(
                 div()
                     .flex_1()
@@ -282,7 +303,15 @@ impl Render for StartWindow {
                             .bg(rgb(0xff252526))
                             .child(self.file_tree.clone())
                     )
-                    .child(self.editor.clone()),
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .h_full()
+                            .child(tabs_bar)
+                            .child(div().flex_1().child(self.editor.clone()))
+                    ),
             )
             .child(div().w_full().h(px(30.0)).bg(rgb(0xff354246)))
             .child(
@@ -317,6 +346,7 @@ impl Render for StartWindow {
                     div().into_any_element()
                 }
             )
+            /*
             .child(
                 modal()
                     .open(self.show_modal)
@@ -334,6 +364,7 @@ impl Render for StartWindow {
                         });
                     }),
             )
+            */
             .child(
                 popover()
                     .open(self.context_menu_open)

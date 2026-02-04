@@ -1,5 +1,6 @@
 use gpui::*;
 pub mod file_tree;
+pub mod tie_svg;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 

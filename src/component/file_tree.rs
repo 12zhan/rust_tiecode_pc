@@ -1,7 +1,8 @@
+use super::tie_svg::tie_svg;
 use gpui::*;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 #[derive(Clone)]
@@ -72,7 +73,7 @@ impl FileTree {
     fn append_entries(&mut self, path: &Path, depth: usize) {
         if let Ok(entries) = fs::read_dir(path) {
             let mut entries_vec: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-            
+
             // Sort: Directories first, then files
             entries_vec.sort_by(|a, b| {
                 let a_is_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
@@ -114,14 +115,19 @@ impl FileTree {
             let mut cx = cx.clone();
             async move {
                 loop {
-                    cx.background_executor().timer(Duration::from_millis(16)).await;
-                    let keep_running = entity.update(&mut cx, |this, cx| this.tick_animation(cx)).unwrap_or(false);
+                    cx.background_executor()
+                        .timer(Duration::from_millis(16))
+                        .await;
+                    let keep_running = entity
+                        .update(&mut cx, |this, cx| this.tick_animation(cx))
+                        .unwrap_or(false);
                     if !keep_running {
                         break;
                     }
                 }
             }
-        }).detach();
+        })
+        .detach();
     }
 
     fn tick_animation(&mut self, cx: &mut Context<Self>) -> bool {
@@ -130,9 +136,9 @@ impl FileTree {
             let max_dist = self.visible_entries.len() as f32;
             let speed = 60.0; // items per second
             let current_dist = elapsed * speed;
-            
+
             cx.notify();
-            
+
             if current_dist > max_dist + 10.0 {
                 self.animating = false;
                 return false;
@@ -179,8 +185,6 @@ impl FileTree {
         }
         false
     }
-
-
 }
 
 impl Render for FileTree {
@@ -192,11 +196,13 @@ impl Render for FileTree {
         let view = cx.entity().clone();
 
         let view_mousemove = view.clone();
-        
+
         let root_path = self.root_path.clone();
         let selected_path = self.selected_path.clone();
         let selection_time = self.selection_time;
-        let selected_row_index = selected_path.as_ref().and_then(|path| visible_entries.iter().position(|e| &e.path == path));
+        let selected_row_index = selected_path
+            .as_ref()
+            .and_then(|path| visible_entries.iter().position(|e| &e.path == path));
 
         div()
             .w_full()
@@ -207,7 +213,7 @@ impl Render for FileTree {
                 view_mousemove.update(cx, |this, cx| {
                     this.mouse_position = e.position;
                     if this.drag_active {
-                         cx.notify();
+                        cx.notify();
                     }
                 });
             })
@@ -223,7 +229,7 @@ impl Render for FileTree {
                     let depth = entry.depth;
                     let is_expanded = entry.is_expanded;
                     let name = entry.name.clone();
-                    
+
                     let view = view.clone();
                     let path_clone = path.clone();
 
@@ -231,7 +237,8 @@ impl Render for FileTree {
                     let theme_text = rgb(0xffcccccc);
                     let theme_selected = rgb(0xff37373d);
 
-                    let is_drop_target = drag_hover.as_ref().map(|p| p == &path).unwrap_or(false) && is_dir;
+                    let is_drop_target =
+                        drag_hover.as_ref().map(|p| p == &path).unwrap_or(false) && is_dir;
                     let is_selected = selected_path.as_ref().map(|p| p == &path).unwrap_or(false);
 
                     let view_click = view.clone();
@@ -259,11 +266,13 @@ impl Render for FileTree {
                     if is_drop_target {
                         row = row.bg(drop_highlight);
                     }
-                    
+
                     // Indentation Guides
                     let relative_path = path.strip_prefix(&root_path).ok();
-                    let relative_selected = selected_path.as_ref().and_then(|p| p.strip_prefix(&root_path).ok());
-                    
+                    let relative_selected = selected_path
+                        .as_ref()
+                        .and_then(|p| p.strip_prefix(&root_path).ok());
+
                     for i in 0..depth {
                         let mut is_active = false;
                         if let (Some(rp), Some(rsp)) = (relative_path, relative_selected) {
@@ -276,7 +285,9 @@ impl Render for FileTree {
 
                         // Animation logic
                         if is_active {
-                            if let (Some(sel_idx), Some(time)) = (selected_row_index, selection_time) {
+                            if let (Some(sel_idx), Some(time)) =
+                                (selected_row_index, selection_time)
+                            {
                                 let elapsed = time.elapsed().as_secs_f32();
                                 let speed = 60.0; // items per second
                                 let max_dist = elapsed * speed;
@@ -286,7 +297,7 @@ impl Render for FileTree {
                                 }
                             }
                         }
-                        
+
                         row = row.child(
                             div()
                                 .absolute()
@@ -294,7 +305,11 @@ impl Render for FileTree {
                                 .top(px(0.0))
                                 .w(px(1.0))
                                 .h_full()
-                                .bg(if is_active { rgb(0x505050) } else { rgb(0x303030) })
+                                .bg(if is_active {
+                                    rgb(0x505050)
+                                } else {
+                                    rgb(0x303030)
+                                }),
                         );
                     }
 
@@ -325,14 +340,18 @@ impl Render for FileTree {
                             view_move.update(cx, |this, cx| {
                                 if let Some(start) = this.drag_start_position {
                                     let diff = e.position - start;
-                                    let dist_sq = f32::from(diff.x).powi(2) + f32::from(diff.y).powi(2);
+                                    let dist_sq =
+                                        f32::from(diff.x).powi(2) + f32::from(diff.y).powi(2);
                                     if dist_sq > 25.0 {
                                         if this.drag_source.is_some() {
                                             this.drag_active = true;
                                             let hover_target = if is_dir {
                                                 path_move.clone()
                                             } else {
-                                                path_move.parent().unwrap_or(&this.root_path).to_path_buf()
+                                                path_move
+                                                    .parent()
+                                                    .unwrap_or(&this.root_path)
+                                                    .to_path_buf()
                                             };
                                             this.drag_hover = Some(hover_target);
                                             cx.notify();
@@ -362,26 +381,21 @@ impl Render for FileTree {
                                 }
                             });
                         })
-                        .child(
-                            div()
-                                .mr(px(6.0))
-                                .child(if is_dir {
-                                    if is_expanded { folder_open_icon().into_any_element() } else { folder_icon().into_any_element() }
-                                } else {
-                                    file_icon(&name).into_any_element()
-                                })
-                        )
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .text_color(theme_text)
-                                .child(name)
-                        );
+                        .child(div().mr(px(6.0)).child(if is_dir {
+                            if is_expanded {
+                                folder_open_icon().into_any_element()
+                            } else {
+                                folder_icon().into_any_element()
+                            }
+                        } else {
+                            file_icon(&name).into_any_element()
+                        }))
+                        .child(div().text_size(px(13.0)).text_color(theme_text).child(name));
 
                     row.into_any_element()
                 })
                 .w_full()
-                .h_full()
+                .h_full(),
             )
     }
 }
@@ -396,7 +410,11 @@ fn get_icon_path(name: &str) -> String {
         _ => {}
     }
 
-    let ext = std::path::Path::new(name).extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    let ext = std::path::Path::new(name)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
     let icon = match ext.as_str() {
         "t" => "tie_file.svg",
         "rs" => "rustFile_dark.svg",
@@ -432,22 +450,22 @@ fn get_icon_path(name: &str) -> String {
 }
 
 fn folder_icon() -> impl IntoElement {
-    svg()
+    tie_svg()
         .path("assets/icons/folder_dark.svg")
         .size(px(16.0))
         .text_color(rgb(0x90a4ae)) // Material Icon Theme default folder color
 }
 
 fn folder_open_icon() -> impl IntoElement {
-    svg()
+    tie_svg()
         .path("assets/icons/folder_dark.svg") // No open variant in list
         .size(px(16.0))
         .text_color(rgb(0x90a4ae))
 }
 
 pub fn file_icon(name: &str) -> impl IntoElement {
-    svg()
+    tie_svg()
         .path(get_icon_path(name))
         .size(px(16.0))
-        .text_color(rgb(0xffffff)) // Reset color to allow SVG colors to show (if not monotone)
+        .original_colors(true)
 }

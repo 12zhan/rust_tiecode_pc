@@ -76,9 +76,11 @@ ICON_DST="${APP_DIR}/Contents/Resources/icon.icns"
 if [[ -f "${ICON_SRC}" ]]; then
   ICON_INPUT="${ICON_SRC}"
   ICON_TMP_DIR="$(mktemp -d)"
-  if ! sips -g pixelWidth "${ICON_SRC}" >/dev/null 2>&1; then
-    echo "sips cannot read ${ICON_SRC}, falling back to ImageMagick" >&2
-    brew install imagemagick
+  if [[ "${ICON_SRC}" == *.ico ]] || ! sips -g pixelWidth "${ICON_SRC}" >/dev/null 2>&1; then
+    echo "Converting icon with ImageMagick..." >&2
+    if ! command -v magick >/dev/null 2>&1; then
+      brew install imagemagick
+    fi
     ICON_INPUT="${ICON_TMP_DIR}/icon.png"
     magick "${ICON_SRC}" -resize 1024x1024 "${ICON_INPUT}"
   fi

@@ -21,7 +21,7 @@ jobs:
             cmake clang pkg-config libssl-dev libclang-dev \
             xvfb libonig-dev \
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-            libxkbcommon-dev libasound2-dev libfontconfig1-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libasound2-dev libfontconfig1-dev \
             libvulkan-dev vulkan-tools
 
       - name: Install Rust

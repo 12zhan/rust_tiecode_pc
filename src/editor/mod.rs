@@ -20,7 +20,7 @@ pub mod undo;
 mod tests;
 
 use crate::editor::grammar::{CPP_GRAMMAR, JIESHENG_GRAMMAR};
-use crate::editor::lsp_integration::{LspManager, LspRequestKind, default_doc_uri};
+use crate::editor::lsp_integration::{LspManager, default_doc_uri};
 
 use self::completion::{CompletionItem, CompletionKind};
 use self::core::{EditorCore, Selection};
@@ -1537,7 +1537,7 @@ impl CodeEditor {
         }
         
         // If no local decoration, request from LSP
-        if let Some(idx) = index {
+        if let Some(_idx) = index {
             /*
             let (line, col) = self.lsp_position_for_index(idx);
             

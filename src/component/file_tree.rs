@@ -398,6 +398,7 @@ fn get_icon_path(name: &str) -> String {
 
     let ext = std::path::Path::new(name).extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
     let icon = match ext.as_str() {
+        "t" => "tie_file.svg",
         "rs" => "rustFile_dark.svg",
         "toml" => "toml_dark.svg",
         "json" => "json_dark.svg",

@@ -82,7 +82,24 @@ if [[ -f "${ICON_SRC}" ]]; then
       brew install imagemagick
     fi
     ICON_INPUT="${ICON_TMP_DIR}/icon.png"
-    magick "${ICON_SRC}" -resize 1024x1024 "${ICON_INPUT}"
+    # Convert ICO to PNG. ICO might contain multiple images, resulting in temp_icon-0.png, temp_icon-1.png...
+    magick "${ICON_SRC}" "${ICON_TMP_DIR}/temp_icon.png"
+
+    if [[ -f "${ICON_TMP_DIR}/temp_icon.png" ]]; then
+        mv "${ICON_TMP_DIR}/temp_icon.png" "${ICON_INPUT}"
+    else
+        # Find the largest file (likely highest res) among generated files
+        # ls -S sorts by size (descending)
+        BIGGEST_ICON=$(ls -S "${ICON_TMP_DIR}"/temp_icon-*.png 2>/dev/null | head -n 1)
+        if [[ -n "${BIGGEST_ICON}" ]]; then
+             echo "Selected ${BIGGEST_ICON} as source icon."
+             mv "${BIGGEST_ICON}" "${ICON_INPUT}"
+        else
+             echo "Error: Failed to convert icon. Files in temp dir:" >&2
+             ls -l "${ICON_TMP_DIR}" >&2
+             exit 1
+        fi
+    fi
   fi
 
   ICONSET_DIR="$(mktemp -d)/icon.iconset"

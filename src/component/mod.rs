@@ -1,5 +1,6 @@
 use gpui::*;
 pub mod file_tree;
+pub mod modal;
 pub mod tie_svg;
 use std::ops::Range;
 use std::time::{Duration, Instant};
@@ -167,6 +168,12 @@ pub struct ComponentLibrary {
     focus_handle: FocusHandle,
 }
 
+pub enum ComponentLibraryEvent {
+    ButtonClicked,
+}
+
+impl EventEmitter<ComponentLibraryEvent> for ComponentLibrary {}
+
 impl ComponentLibrary {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
@@ -297,6 +304,7 @@ impl ComponentLibrary {
                     self.button_count += 1;
                     self.input_value = format!("输入内容 {}", self.button_count);
                     self.input_cursor = self.input_value.len();
+                    cx.emit(ComponentLibraryEvent::ButtonClicked);
                 }
             }
         }

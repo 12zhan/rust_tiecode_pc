@@ -5,7 +5,15 @@ mod editor;
 pub mod lsp;
 
 use component::{
-    file_tree::{FileTree, file_icon, FileTreeEvent}, ComponentLibrary, InputBackspace, InputDelete, InputLeft, InputRight, InputSelectAll,
+    file_tree::{file_icon, FileTree, FileTreeEvent},
+    modal::modal,
+    ComponentLibrary,
+    ComponentLibraryEvent,
+    InputBackspace,
+    InputDelete,
+    InputLeft,
+    InputRight,
+    InputSelectAll,
 };
 use editor::{
     Backspace, CodeEditor, CodeEditorEvent, Copy, CtrlShiftTab, Cut, Delete, DeleteLine, Down, Enter, Escape,
@@ -157,11 +165,28 @@ fn main() {
                         }
                     });
 
+                    let component_library_subscription = cx.subscribe(
+                        &component_library,
+                        |this: &mut StartWindow, _emitter, event: &ComponentLibraryEvent, cx| {
+                            match event {
+                                ComponentLibraryEvent::ButtonClicked => {
+                                    this.show_modal = true;
+                                    cx.notify();
+                                }
+                            }
+                        },
+                    );
+
                     StartWindow {
                         editor,
                         component_library,
                         file_tree,
-                        _subscriptions: vec![subscription, editor_subscription],
+                        show_modal: false,
+                        _subscriptions: vec![
+                            subscription,
+                            editor_subscription,
+                            component_library_subscription,
+                        ],
                     }
                 })
             },
@@ -173,11 +198,13 @@ struct StartWindow {
     editor: Entity<CodeEditor>,
     component_library: Entity<ComponentLibrary>,
     file_tree: Entity<FileTree>,
+    show_modal: bool,
     _subscriptions: Vec<Subscription>,
 }
 
 impl Render for StartWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let view = cx.entity();
         let file_tree_view = self.file_tree.read(cx);
         let file_tree = self.file_tree.clone();
         let is_dragging = file_tree_view.is_dragging();
@@ -267,6 +294,23 @@ impl Render for StartWindow {
                 } else {
                     div().into_any_element()
                 }
+            )
+            .child(
+                modal()
+                    .open(self.show_modal)
+                    .title("弹窗")
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(rgb(0xffe6e0d9))
+                            .child("点击了按钮，弹窗已打开"),
+                    )
+                    .on_dismiss(move |_window, cx| {
+                        view.update(cx, |this, cx| {
+                            this.show_modal = false;
+                            cx.notify();
+                        });
+                    }),
             )
     }
 }

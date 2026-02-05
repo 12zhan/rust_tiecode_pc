@@ -5429,8 +5429,26 @@ dependencies = [
  "serde_repr",
  "smallvec",
  "thiserror 1.0.69",
+ "tiecode-plugin-api",
  "url",
  "winres",
+]
+
+[[package]]
+name = "tiecode-plugin-api"
+version = "0.1.0"
+
+[[package]]
+name = "tiecode-plugin-lsp"
+version = "0.1.0"
+dependencies = [
+ "libloading",
+ "log",
+ "serde",
+ "serde_json",
+ "serde_repr",
+ "thiserror 1.0.69",
+ "tiecode-plugin-api",
 ]
 
 [[package]]

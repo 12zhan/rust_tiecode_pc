@@ -37,7 +37,6 @@ use crate::editor::grammar::{
 };
 use crate::editor::lsp_integration::{LspManager, default_doc_uri};
 
-use self::completion::{CompletionItem, CompletionKind};
 use self::core::{EditorCore, Selection};
 use self::layout::EditorLayout;
 use tiecode::sweetline::{Document, DocumentAnalyzer, Engine, HighlightSpan};
@@ -409,16 +408,37 @@ impl CodeEditor {
             
             // --- C++ Keyword Completion (Fixed) ---
             let content = &self.core.content;
+            let len_bytes = content.len_bytes();
+            
+            if cursor > len_bytes {
+                return;
+            }
+
             let mut word_start = cursor;
             let mut current_idx = cursor;
+            let len_chars = content.len_chars();
+
             while current_idx > 0 {
+                if current_idx > len_bytes {
+                    break;
+                }
+
                 let char_idx = content.byte_to_char(current_idx);
                 if char_idx == 0 && current_idx > 0 {
                      break;
                 }
-                let prev_char_idx = char_idx - 1;
+                
+                let prev_char_idx = char_idx.saturating_sub(1);
+                if prev_char_idx >= len_chars {
+                    break;
+                }
+
                 let ch = content.char(prev_char_idx);
                 let char_len = ch.len_utf8();
+                
+                if current_idx < char_len {
+                    break;
+                }
                 let prev_byte_idx = current_idx - char_len;
 
                 if !ch.is_alphanumeric() && ch != '_' && ch != '#' {
@@ -432,33 +452,22 @@ impl CodeEditor {
             let prefix = content.slice(word_start..cursor).to_string();
             
             if !prefix.is_empty() {
-                 let keywords = vec![
-                    "int", "char", "void", "return", "class", "struct", 
-                    "template", "typename", "static", "const", "virtual", 
-                    "override", "public", "private", "protected", "if", 
-                    "else", "for", "while", "do", "switch", "case", 
-                    "break", "continue", "namespace", "using", "include",
-                    "std", "vector", "string", "map", "auto", "bool", "true", "false",
-                    "nullptr", "this", "new", "delete", "friend", "inline"
-                ];
-                
-                let items: Vec<CompletionItem> = keywords.into_iter()
-                    .filter(|k| k.starts_with(&prefix))
-                    .map(|k| CompletionItem {
-                        label: k.to_string(),
-                        kind: CompletionKind::Keyword,
-                        detail: "C++ Keyword".to_string(),
-                    })
-                    .collect();
+                // Use LSP for completion
+                let line_idx = content.byte_to_line(cursor);
+                let line_start_byte = content.line_to_byte(line_idx);
+                let char_idx = content.byte_to_char(cursor).saturating_sub(content.byte_to_char(line_start_byte));
 
-                if !items.is_empty() {
-                    self.core.completion_items = items;
-                    self.core.completion_active = true;
-                    self.core.completion_index = 0;
-                    self.completion_scroll_offset = 0.0;
-                    cx.notify();
-                    // Return early to skip LSP for now as requested
-                    return;
+                if let Some(mut items) = self.lsp_manager.completion(line_idx, char_idx) {
+                    items.retain(|item| item.label.starts_with(&prefix));
+                    
+                    if !items.is_empty() {
+                        self.core.completion_items = items;
+                        self.core.completion_active = true;
+                        self.core.completion_index = 0;
+                        self.completion_scroll_offset = 0.0;
+                        cx.notify();
+                        return;
+                    }
                 }
             }
             // --- End C++ Keyword Completion ---
@@ -474,17 +483,33 @@ impl CodeEditor {
             let primary = self.core.primary_selection();
             let cursor = primary.head;
             let content = &self.core.content;
+            let len_bytes = content.len_bytes();
+            let len_chars = content.len_chars();
+            
             let mut word_start = cursor;
-
             let mut current_idx = cursor;
+            
             while current_idx > 0 {
+                if current_idx > len_bytes {
+                    break;
+                }
+
                 let char_idx = content.byte_to_char(current_idx);
                 if char_idx == 0 && current_idx > 0 {
                     break;
                 }
-                let prev_char_idx = char_idx - 1;
+                
+                let prev_char_idx = char_idx.saturating_sub(1);
+                if prev_char_idx >= len_chars {
+                    break;
+                }
+
                 let ch = content.char(prev_char_idx);
                 let char_len = ch.len_utf8();
+                
+                if current_idx < char_len {
+                    break;
+                }
                 let prev_byte_idx = current_idx - char_len;
 
                 if !ch.is_alphanumeric() && ch != '_' && ch != '#' {
@@ -1057,7 +1082,11 @@ impl CodeEditor {
         line_text: &str,
     ) -> Vec<(Range<usize>, Hsla)> {
         let mut result = Vec::new();
-        let line_start_char = self.core.content.byte_to_char(line_start_byte);
+        
+        let content_len = self.core.content.len_bytes();
+        let safe_line_start_byte = line_start_byte.min(content_len);
+        let line_start_char = self.core.content.byte_to_char(safe_line_start_byte);
+        
         let line_char_len = line_text.chars().count();
         let line_end_char = line_start_char + line_char_len;
 

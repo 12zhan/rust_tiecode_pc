@@ -2,7 +2,7 @@
 
 mod component;
 mod editor;
-pub mod lsp;
+mod plugin;
 
 use component::{
     file_tree::{file_icon, FileTree, FileTreeEvent},

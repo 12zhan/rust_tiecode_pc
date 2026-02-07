@@ -220,6 +220,54 @@ impl CodeEditor {
          self.lsp_manager.initialize(&self.core.content.to_string());
     }
 
+    pub fn perform_undo(&mut self, cx: &mut Context<Self>) {
+        self.core.undo();
+        self.sync_sweetline_document();
+        cx.notify();
+    }
+
+    pub fn perform_redo(&mut self, cx: &mut Context<Self>) {
+        self.core.redo();
+        self.sync_sweetline_document();
+        cx.notify();
+    }
+
+    pub fn perform_select_all(&mut self, cx: &mut Context<Self>) {
+        self.core.select_all();
+        self.core.completion_active = false;
+        cx.notify();
+    }
+
+    pub fn perform_copy(&mut self, cx: &mut Context<Self>) {
+        let mut texts = Vec::new();
+        for selection in &self.core.selections {
+            if !selection.is_empty() {
+                texts.push(self.core.content.byte_slice(selection.range()).to_string());
+            }
+        }
+        if texts.is_empty() {
+            return;
+        }
+        let text = texts.join("\n");
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
+    pub fn perform_cut(&mut self, cx: &mut Context<Self>) {
+        self.perform_copy(cx);
+        self.core.delete_selection();
+        self.sync_sweetline_document();
+        cx.notify();
+    }
+
+    pub fn perform_paste(&mut self, cx: &mut Context<Self>) {
+        if let Some(item) = cx.read_from_clipboard() {
+            if let Some(text) = item.text() {
+                self.insert_text(&text, cx);
+            }
+        }
+    }
+
+
     fn paint_soft_shadow(window: &mut Window, bounds: Bounds<Pixels>, corner_radius: Pixels) {
         let steps = 10;
         let max_blur = px(24.0);
@@ -378,7 +426,7 @@ impl CodeEditor {
             let key = format!("{}:{}", line, line_text_string);
             let x_offset = if let Ok(mut cache) = self.render_cache.lock() {
                 if let Some(line) = cache.get(&key) {
-                     let local_index = index.saturating_sub(line_start);
+                     let local_index = index.saturating_sub(line_start).min(line_text_string.len());
                      line.x_for_index(local_index)
                 } else {
                     px(0.0)
@@ -610,6 +658,9 @@ impl CodeEditor {
     }
 
     fn enter(&mut self, _: &Enter, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.core.marked_range.is_some() {
+            return;
+        }
         if self.core.completion_active {
             self.confirm_completion(cx);
             return;
@@ -1279,36 +1330,31 @@ impl CodeEditor {
         content.char_to_byte(char_idx + 1)
     }
 
-    fn offset_to_utf16(&self, offset: usize) -> usize {
-        let len = self.core.content.len_bytes();
-        if offset > len {
-            eprintln!(
-                "Warning: offset_to_utf16 out of bounds: {} > {}",
-                offset, len
-            );
-            return self.core.content.len_utf16_cu();
+    fn utf16_index_to_byte_in_str(text: &str, utf16_index: usize) -> usize {
+        let mut count = 0;
+        for (byte_index, ch) in text.char_indices() {
+            let next = count + ch.len_utf16();
+            if next > utf16_index {
+                return byte_index;
+            }
+            count = next;
         }
-        let char_idx = self.core.content.byte_to_char(offset);
-        self.core.content.slice(0..char_idx).len_utf16_cu()
+        text.len()
     }
 
-    fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
-        let start = self.offset_to_utf16(range.start);
-        let end = self.offset_to_utf16(range.end);
-        start..end
+    fn utf16_range_to_byte_range_in_str(
+        text: &str,
+        range_utf16: &Range<usize>,
+    ) -> Range<usize> {
+        let start = Self::utf16_index_to_byte_in_str(text, range_utf16.start);
+        let end = Self::utf16_index_to_byte_in_str(text, range_utf16.end);
+        if start <= end {
+            start..end
+        } else {
+            end..start
+        }
     }
 
-    fn range_from_utf16(&self, range_utf16: &Range<usize>) -> Range<usize> {
-        let len_utf16 = self.core.content.len_utf16_cu();
-        let start = range_utf16.start.min(len_utf16);
-        let end = range_utf16.end.min(len_utf16);
-
-        let start_char = self.core.content.utf16_cu_to_char(start);
-        let end_char = self.core.content.utf16_cu_to_char(end);
-        let start_byte = self.core.content.char_to_byte(start_char);
-        let end_byte = self.core.content.char_to_byte(end_char);
-        start_byte..end_byte
-    }
 
     fn shape_line(window: &Window, text: &str, color: Hsla, font_size: Pixels) -> ShapedLine {
         let style = window.text_style();
@@ -1388,8 +1434,8 @@ impl EntityInputHandler for CodeEditor {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
-        let range = self.range_from_utf16(&range_utf16);
-        adjusted_range.replace(self.range_to_utf16(&range));
+        let range = self.core.range_from_utf16(&range_utf16);
+        adjusted_range.replace(self.core.range_to_utf16(&range));
         Some(self.core.content.byte_slice(range).to_string())
     }
 
@@ -1402,7 +1448,7 @@ impl EntityInputHandler for CodeEditor {
         // Return primary selection for IME
         let primary = self.core.primary_selection();
         Some(UTF16Selection {
-            range: self.range_to_utf16(&primary.range()),
+            range: self.core.range_to_utf16(&primary.range()),
             reversed: primary.head < primary.anchor,
         })
     }
@@ -1415,7 +1461,7 @@ impl EntityInputHandler for CodeEditor {
         self.core
             .marked_range
             .as_ref()
-            .map(|range| self.range_to_utf16(range))
+            .map(|range| self.core.range_to_utf16(range))
     }
 
     fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
@@ -1431,7 +1477,7 @@ impl EntityInputHandler for CodeEditor {
     ) {
         let range = range_utf16
             .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
+            .map(|range_utf16| self.core.range_from_utf16(range_utf16))
             .or(self.core.marked_range.clone())
             .unwrap_or(self.core.primary_selection().range());
 
@@ -1451,11 +1497,19 @@ impl EntityInputHandler for CodeEditor {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let range = range_utf16
+        let mut range = range_utf16
             .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
+            .map(|range_utf16| self.core.range_from_utf16(range_utf16))
             .or(self.core.marked_range.clone())
             .unwrap_or(self.core.primary_selection().range());
+
+        // Ensure range is within bounds to prevent crash
+        let content_len = self.core.content.len_bytes();
+        if range.start > content_len || range.end > content_len {
+            eprintln!("Warning: replace_and_mark_text_in_range range out of bounds: {:?} (len: {})", range, content_len);
+            range.start = range.start.min(content_len);
+            range.end = range.end.min(content_len);
+        }
 
         self.core.replace_range(range.clone(), new_text);
         self.sync_sweetline_document();
@@ -1472,7 +1526,7 @@ impl EntityInputHandler for CodeEditor {
         }
 
         if let Some(new_range_utf16) = new_selected_range_utf16 {
-            let new_range = self.range_from_utf16(&new_range_utf16);
+            let new_range = Self::utf16_range_to_byte_range_in_str(new_text, &new_range_utf16);
             let start = range.start + new_range.start;
             let end = range.start + new_range.end;
             self.core.selections = vec![Selection::new(start, end)];
@@ -1491,7 +1545,10 @@ impl EntityInputHandler for CodeEditor {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let bounds = self.layout.last_bounds.unwrap_or(bounds);
-        let range = self.range_from_utf16(&range_utf16);
+        let mut range = self.core.range_from_utf16(&range_utf16);
+        if range.start > range.end {
+            std::mem::swap(&mut range.start, &mut range.end);
+        }
         let content = &self.core.content;
 
         let line_count = content.len_lines().max(1);
@@ -1518,8 +1575,11 @@ impl EntityInputHandler for CodeEditor {
             line_index,
             line_start,
         );
-        let start_x = line.x_for_index(range.start - line_start);
-        let end_x = line.x_for_index(range.end - line_start);
+        let line_len = line_text.len();
+        let start_in_line = (range.start - line_start).min(line_len);
+        let end_in_line = (range.end - line_start).min(line_len);
+        let start_x = line.x_for_index(start_in_line);
+        let end_x = line.x_for_index(end_in_line);
         Some(Bounds::from_corners(
             point(text_x + start_x, y),
             point(text_x + end_x, y + line_height),
@@ -1561,12 +1621,12 @@ impl EntityInputHandler for CodeEditor {
             line_index,
             line_start,
         );
-        let local_x = point.x - text_x;
+        let local_x = (point.x - text_x).max(px(0.0));
         let utf8_index = Self::clamp_to_char_boundary(
             &line_text,
             line.index_for_x(local_x).unwrap_or(line_text.len()),
         );
-        Some(self.offset_to_utf16(line_start + utf8_index))
+        Some(self.core.offset_to_utf16(line_start + utf8_index))
     }
 }
 
@@ -1678,7 +1738,7 @@ impl CodeEditor {
             line_index,
             line_start,
         );
-        let local_x = point.x - text_x;
+        let local_x = (point.x - text_x).max(px(0.0));
         let utf8_index = Self::clamp_to_char_boundary(
             line_text,
             line.index_for_x(local_x).unwrap_or(line_text.len()),
@@ -2061,7 +2121,9 @@ pub fn code_editor_canvas(
                                 let line_shape = editor.read(cx).get_cached_shape_line(
                                     window, line_text, font_size, line, line_start,
                                 );
-                                let local_index = head.saturating_sub(line_start);
+                                let local_index = head
+                                    .saturating_sub(line_start)
+                                    .min(line_text.len());
                                 let cursor_x = text_x + line_shape.x_for_index(local_index);
                                 let cursor_y = layout.line_y(bounds, line);
                                 let caret_width = if is_primary { px(2.0) } else { px(1.0) };
@@ -2096,7 +2158,9 @@ pub fn code_editor_canvas(
                             let line_shape = editor.read(cx).get_cached_shape_line(
                                 window, line_text, font_size, line, line_start,
                             );
-                            let local_index = primary_head.saturating_sub(line_start);
+                            let local_index = primary_head
+                                .saturating_sub(line_start)
+                                .min(line_text.len());
                             let cursor_x = text_x + line_shape.x_for_index(local_index);
                             let cursor_y = layout.line_y(bounds, line);
 

@@ -3,22 +3,29 @@
 mod component;
 mod editor;
 mod plugin;
+mod panic_handler;
 
 use component::{
+    command_palette::{CommandPalette, CommandPaletteEvent},
     file_tree::{file_icon, FileTree, FileTreeEvent},
     modal::modal,
     popover::popover,
     tie_svg::tie_svg,
+    status_bar::StatusBar,
 };
 use editor::{
     Backspace, CodeEditor, CodeEditorEvent, Copy, CtrlShiftTab, Cut, Delete, DeleteLine, Down, Enter, Escape,
     FindNext, FindPrev, GoToDefinition, FormatDocument, SignatureHelp, Left, Paste, Redo, Right, SelectAll, ShiftTab, Tab, ToggleFind, Undo, Up,
 };
+use plugin::manager::PluginManager;
+use tiecode_plugin_api::CommandContribution;
 use anyhow::Result;
 use gpui::*;
 use log::*;
 use std::fs;
 use std::path::PathBuf;
+
+actions!(start_window, [ShowCommandPalette]);
 
 struct Assets {
     base: PathBuf,
@@ -73,6 +80,7 @@ fn default_assets_base() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 fn main() {
+    panic_handler::init();
     env_logger::init();
 
     Application::new()
@@ -122,6 +130,7 @@ fn main() {
             KeyBinding::new(&format!("{}-shift-z", ctrl_cmd), Redo, Some("CodeEditor")),
             KeyBinding::new(&format!("{}-f", ctrl_cmd), ToggleFind, Some("CodeEditor")),
             KeyBinding::new(&format!("{}-a", ctrl_cmd), SelectAll, Some("CodeEditor")),
+            KeyBinding::new(&format!("{}-shift-p", ctrl_cmd), ShowCommandPalette, None),
         ]);
 
         // 4. 注册所有绑定
@@ -148,6 +157,64 @@ fn main() {
                     editor.set_content(sample.to_string(), cx);
                 }); */
                 let file_tree = cx.new(|cx| FileTree::new(None, cx));
+                let command_palette = cx.new(CommandPalette::new);
+                let plugin_manager = cx.new(|_| PluginManager::new());
+                let status_bar = cx.new(|cx| StatusBar::new(editor.clone()));
+                
+                plugin_manager.update(cx, |manager: &mut PluginManager, _cx| {
+                    manager.discover_plugins();
+                    manager.command_registry.register(CommandContribution {
+                        command: "file_tree.toggle".to_string(),
+                        title: "Toggle File Tree".to_string(),
+                        category: Some("View".to_string()),
+                    });
+                    manager.command_registry.register(CommandContribution {
+                        command: "core.undo".to_string(),
+                        title: "Undo".to_string(),
+                        category: Some("Edit".to_string()),
+                    });
+                    manager.command_registry.register(CommandContribution {
+                        command: "core.redo".to_string(),
+                        title: "Redo".to_string(),
+                        category: Some("Edit".to_string()),
+                    });
+                    manager.command_registry.register(CommandContribution {
+                        command: "core.cut".to_string(),
+                        title: "Cut".to_string(),
+                        category: Some("Edit".to_string()),
+                    });
+                    manager.command_registry.register(CommandContribution {
+                        command: "core.copy".to_string(),
+                        title: "Copy".to_string(),
+                        category: Some("Edit".to_string()),
+                    });
+                    manager.command_registry.register(CommandContribution {
+                        command: "core.paste".to_string(),
+                        title: "Paste".to_string(),
+                        category: Some("Edit".to_string()),
+                    });
+                    manager.command_registry.register(CommandContribution {
+                        command: "core.select_all".to_string(),
+                        title: "Select All".to_string(),
+                        category: Some("Edit".to_string()),
+                    });
+                    manager.command_registry.register(CommandContribution {
+                        command: "core.save".to_string(),
+                        title: "Save".to_string(),
+                        category: Some("File".to_string()),
+                    });
+                    manager.command_registry.register(CommandContribution {
+                        command: "core.close".to_string(),
+                        title: "Close Editor".to_string(),
+                        category: Some("File".to_string()),
+                    });
+                    manager.command_registry.register(CommandContribution {
+                        command: "core.exit".to_string(),
+                        title: "Exit".to_string(),
+                        category: Some("File".to_string()),
+                    });
+                });
+
                 cx.new(|cx| {
                     let subscription = cx.subscribe(&file_tree, |this: &mut StartWindow, _emitter, event: &FileTreeEvent, cx| {
                         match event {
@@ -190,9 +257,28 @@ fn main() {
                         }
                     });
 
+                    let palette_subscription = cx.subscribe(&command_palette, |this: &mut StartWindow, _emitter, event: &CommandPaletteEvent, cx| {
+                        match event {
+                            CommandPaletteEvent::Dismiss => {
+                                this.command_palette.update(cx, |palette, cx| {
+                                    palette.hide(cx);
+                                });
+                                this.needs_focus_restore = true;
+                                cx.notify();
+                            }
+                            CommandPaletteEvent::ExecuteCommand(command_id) => {
+                                this.execute_command(&command_id, cx);
+                            }
+                        }
+                    });
+
                     StartWindow {
                         editor,
                         file_tree,
+                        command_palette,
+                        plugin_manager,
+                        status_bar,
+                        file_tree_visible: true,
                         open_tabs: Vec::new(),
                         active_tab: None,
                         external_drag_position: point(px(0.0), px(0.0)),
@@ -208,7 +294,10 @@ fn main() {
                         _subscriptions: vec![
                             subscription,
                             editor_subscription,
+                            palette_subscription,
                         ],
+                        needs_focus_restore: false,
+                        needs_initial_focus: true,
                     }
                 })
             },
@@ -219,6 +308,10 @@ fn main() {
 struct StartWindow {
     editor: Entity<CodeEditor>,
     file_tree: Entity<FileTree>,
+    command_palette: Entity<CommandPalette>,
+    plugin_manager: Entity<PluginManager>,
+    status_bar: Entity<StatusBar>,
+    file_tree_visible: bool,
     open_tabs: Vec<PathBuf>,
     active_tab: Option<PathBuf>,
     external_drag_position: Point<Pixels>,
@@ -232,6 +325,8 @@ struct StartWindow {
     context_menu_path: Option<PathBuf>,
     context_menu_is_dir: bool,
     _subscriptions: Vec<Subscription>,
+    needs_focus_restore: bool,
+    needs_initial_focus: bool,
 }
 
 #[derive(Clone)]
@@ -268,6 +363,21 @@ impl StartWindow {
             }
         }
         cx.notify();
+    }
+
+    fn save_file(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = &self.active_tab {
+            let content = self.editor.read(cx).core.content.to_string();
+            if let Err(e) = std::fs::write(path, content) {
+                println!("Failed to save file: {}", e);
+            }
+        }
+    }
+
+    fn close_active_tab(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = self.active_tab.clone() {
+            self.close_tab(&path, cx);
+        }
     }
 
     fn request_confirm(&mut self, action: ConfirmAction, cx: &mut Context<Self>) {
@@ -341,11 +451,74 @@ impl StartWindow {
         }
         cx.notify();
     }
+
+    fn show_command_palette(&mut self, _: &ShowCommandPalette, window: &mut Window, cx: &mut Context<Self>) {
+        let commands = self.plugin_manager.read(cx).command_registry.list().into_iter().cloned().collect();
+        let handle = self.command_palette.read(cx).focus_handle.clone();
+        handle.focus(window);
+        self.command_palette.update(cx, |palette, cx| {
+            palette.set_commands(commands, cx);
+            palette.show(cx);
+        });
+    }
+
+    fn execute_command(&mut self, command_id: &str, cx: &mut Context<Self>) {
+        match command_id {
+            "file_tree.toggle" => {
+                self.file_tree_visible = !self.file_tree_visible;
+                cx.notify();
+            }
+            "core.undo" => {
+                self.editor.update(cx, |editor, cx| {
+                    editor.perform_undo(cx);
+                });
+            }
+            "core.redo" => {
+                self.editor.update(cx, |editor, cx| {
+                    editor.perform_redo(cx);
+                });
+            }
+            "core.cut" => {
+                self.editor.update(cx, |editor, cx| {
+                    editor.perform_cut(cx);
+                });
+            }
+            "core.copy" => {
+                self.editor.update(cx, |editor, cx| {
+                    editor.perform_copy(cx);
+                });
+            }
+            "core.paste" => {
+                self.editor.update(cx, |editor, cx| {
+                    editor.perform_paste(cx);
+                });
+            }
+            "core.select_all" => {
+                self.editor.update(cx, |editor, cx| {
+                    editor.perform_select_all(cx);
+                });
+            }
+            "core.save" => {
+                self.save_file(cx);
+            }
+            "core.close" => {
+                self.close_active_tab(cx);
+            }
+            "core.exit" => {
+                std::process::exit(0);
+            }
+            _ => {
+                println!("Executing command: {}", command_id);
+                // Future: Delegate to plugin manager
+            }
+        }
+    }
 }
 
 impl Render for StartWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
+        let view_for_focus = view.clone();
         let file_tree_view = self.file_tree.read(cx);
         let file_tree = self.file_tree.clone();
         let file_tree_for_drop = file_tree.clone();
@@ -368,6 +541,7 @@ impl Render for StartWindow {
         let external_drag_is_dir = self.external_drag_is_dir;
         let external_drag_count = self.external_drag_count;
         let show_external_drag = cx.has_active_drag() && external_drag_primary.is_some();
+        let file_tree_visible = self.file_tree_visible;
 
         let mut tabs_bar = div()
             .w_full()
@@ -481,6 +655,18 @@ impl Render for StartWindow {
             .flex_col()
             .w_full()
             .h_full()
+            .on_children_prepainted(move |_, window, cx| {
+                view_for_focus.update(cx, |this, cx| {
+                    if (this.needs_focus_restore || this.needs_initial_focus)
+                        && !this.command_palette.read(cx).is_visible()
+                    {
+                        this.needs_focus_restore = false;
+                        this.needs_initial_focus = false;
+                        let handle = this.editor.read(cx).focus_handle.clone();
+                        handle.focus(window);
+                    }
+                });
+            })
             .on_drag_move(cx.listener(|this, event: &DragMoveEvent<ExternalPaths>, _window, cx| {
                 let paths = event.drag(cx).paths();
                 this.external_drag_position = event.event.position;
@@ -527,13 +713,17 @@ impl Render for StartWindow {
                     .w_full()
                     .bg(rgb(0xff2d353b))
                     .child(
-                        div()
-                            .w(px(250.0))
-                            .h_full()
-                            .border_r_1()
-                            .border_color(rgb(0xff3c474d))
-                            .bg(rgb(0xff252526))
-                            .child(self.file_tree.clone())
+                        if file_tree_visible {
+                            div()
+                                .w(px(250.0))
+                                .h_full()
+                                .border_r_1()
+                                .border_color(rgb(0xff3c474d))
+                                .bg(rgb(0xff252526))
+                                .child(self.file_tree.clone())
+                        } else {
+                            div()
+                        }
                     )
                     .child(
                         div()
@@ -545,7 +735,7 @@ impl Render for StartWindow {
                             .child(div().flex_1().child(self.editor.clone()))
                     ),
             )
-            .child(div().w_full().h(px(30.0)).bg(rgb(0xff354246)))
+            .child(self.status_bar.clone())
             .child(
                 if is_dragging {
                     if let Some(path) = drag_source {
@@ -699,6 +889,8 @@ impl Render for StartWindow {
             } else {
                 div().into_any_element()
             })
+            .child(self.command_palette.clone())
+            .on_action(cx.listener(Self::show_command_palette))
             /*
             .child(
                 modal()

@@ -255,23 +255,62 @@ impl EditorCore {
     }
 
     fn apply_op(&mut self, op: EditOperation) {
+        let len = self.content.len_bytes();
         match op {
             EditOperation::Insert { range, text } => {
-                let start_char_idx = self.content.byte_to_char(range.start);
+                let start = range.start.min(len);
+                let start_char_idx = self.content.byte_to_char(start);
                 self.content.insert(start_char_idx, &text);
-                // Update cursor?
-                // For undo/redo, we might want to just select the affected range or end of it.
-                // Simple approach: Set cursor to end.
-                // With multiple cursors, this will collapse them?
-                // Yes, simpler for now.
-                self.selections = vec![Selection::new(range.end, range.end)];
+                // Update cursor
+                let new_pos = start + text.len();
+                self.selections = vec![Selection::new(new_pos, new_pos)];
             },
             EditOperation::Delete { range, .. } => {
-                 let start_char_idx = self.content.byte_to_char(range.start);
-                 let end_char_idx = self.content.byte_to_char(range.end);
-                 self.content.remove(start_char_idx..end_char_idx);
-                 self.selections = vec![Selection::new(range.start, range.start)];
+                 let start = range.start.min(len);
+                 let end = range.end.min(len);
+                 
+                 if start < end {
+                     let start_char_idx = self.content.byte_to_char(start);
+                     let end_char_idx = self.content.byte_to_char(end);
+                     self.content.remove(start_char_idx..end_char_idx);
+                 }
+                 self.selections = vec![Selection::new(start, start)];
             }
+        }
+    }
+
+    pub fn offset_to_utf16(&self, offset: usize) -> usize {
+        let len = self.content.len_bytes();
+        if offset > len {
+            eprintln!(
+                "Warning: offset_to_utf16 out of bounds: {} > {}",
+                offset, len
+            );
+            return self.content.len_utf16_cu();
+        }
+        let char_idx = self.content.byte_to_char(offset);
+        self.content.slice(0..char_idx).len_utf16_cu()
+    }
+
+    pub fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
+        let start = self.offset_to_utf16(range.start);
+        let end = self.offset_to_utf16(range.end);
+        start..end
+    }
+
+    pub fn range_from_utf16(&self, range_utf16: &Range<usize>) -> Range<usize> {
+        let len_utf16 = self.content.len_utf16_cu();
+        let start = range_utf16.start.min(len_utf16);
+        let end = range_utf16.end.min(len_utf16);
+
+        let start_char = self.content.utf16_cu_to_char(start);
+        let end_char = self.content.utf16_cu_to_char(end);
+        let start_byte = self.content.char_to_byte(start_char);
+        let end_byte = self.content.char_to_byte(end_char);
+        if start_byte <= end_byte {
+            start_byte..end_byte
+        } else {
+            end_byte..start_byte
         }
     }
 }
@@ -372,5 +411,84 @@ mod tests {
         core.select_all();
         assert_eq!(core.selections.len(), 1);
         assert_eq!(core.selections[0].range(), 0..core.content.len_bytes());
+    }
+
+    #[test]
+    fn test_utf16_conversions_and_ime_crash_simulation() {
+        let mut core = EditorCore::new();
+        // "Hello"
+        core.content = Rope::from("Hello");
+        
+        // Test basic conversion
+        let range_utf16 = 0..5;
+        let range = core.range_from_utf16(&range_utf16);
+        assert_eq!(range, 0..5);
+        
+        let range_utf16_back = core.range_to_utf16(&range);
+        assert_eq!(range_utf16_back, 0..5);
+        
+        // Test Chinese (3 bytes per char, 1 UTF-16 unit)
+        // "你好" -> 6 bytes, 2 chars, 2 UTF-16 units
+        core.content = Rope::from("你好");
+        let range_utf16 = 0..2;
+        let range = core.range_from_utf16(&range_utf16);
+        assert_eq!(range, 0..6);
+        
+        let range_utf16_back = core.range_to_utf16(&range);
+        assert_eq!(range_utf16_back, 0..2);
+        
+        // Test partial Chinese char (should not happen normally but check safety)
+        // 1 UTF-16 unit -> 1 char -> 3 bytes
+        let range_utf16 = 0..1;
+        let range = core.range_from_utf16(&range_utf16);
+        assert_eq!(range, 0..3);
+        
+        // Test Emoji (4 bytes, 2 UTF-16 units)
+        // "👋" -> \u{1F44B} -> 4 bytes. UTF-16: 0xD83D 0xDC4B (2 units)
+        core.content = Rope::from("👋");
+        assert_eq!(core.content.len_bytes(), 4);
+        assert_eq!(core.content.len_utf16_cu(), 2);
+        
+        let range_utf16 = 0..2;
+        let range = core.range_from_utf16(&range_utf16);
+        assert_eq!(range, 0..4);
+        
+        // Simulation of IME crash
+        // 1. User types "z"
+        core.content = Rope::from("");
+        core.replace_range(0..0, "z");
+        core.marked_range = Some(0..1); // "z"
+        
+        // 2. User types "h"
+        // Replace marked range "z" (0..1) with "zh"
+        let range = core.marked_range.clone().unwrap();
+        core.replace_range(range.clone(), "zh");
+        // Update marked range
+        let new_end = range.start + 2; // "zh".len()
+        core.marked_range = Some(range.start..new_end);
+        
+        // 3. User selects "中" (3 bytes)
+        // Replace marked range "zh" (0..2) with "中"
+        let range = core.marked_range.clone().unwrap();
+        // range is 0..2. content is "zh" (2 bytes).
+        // replace_range(0..2, "中")
+        core.replace_range(range, "中");
+        // marked_range cleared by replace_range
+        assert!(core.marked_range.is_none());
+        assert_eq!(core.content.to_string(), "中");
+        
+        // Test Out of Bounds
+        core.content = Rope::from("a");
+        // range_utf16 out of bounds
+        let range_utf16 = 0..100;
+        let range = core.range_from_utf16(&range_utf16);
+        // Should clamp to 0..1 (byte range)
+        assert_eq!(range, 0..1);
+        
+        // range_utf16 start out of bounds
+        let range_utf16 = 50..100;
+        let range = core.range_from_utf16(&range_utf16);
+        // Should clamp to 1..1 (empty at end)
+        assert_eq!(range, 1..1);
     }
 }

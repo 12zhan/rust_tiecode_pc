@@ -1,9 +1,11 @@
 use gpui::*;
 pub mod file_tree;
+pub mod command_palette;
 pub mod measure_bounds;
 pub mod modal;
 pub mod popover;
 pub mod tie_svg;
+pub mod status_bar;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 

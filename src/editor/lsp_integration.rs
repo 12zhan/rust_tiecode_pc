@@ -140,10 +140,10 @@ impl LspManager {
         if let Some(plugin) = self.ensure_plugin() {
             match plugin.completion(&doc_uri, line, character) {
                 Ok(value) => {
-                    if let Some(items) = value.get("items").and_then(|i| i.as_array()) {
-                        let result = items.iter().filter_map(|item| {
+                    if let Some(items) = value.get("items").and_then(|i: &serde_json::Value| i.as_array()) {
+                        let result = items.iter().filter_map(|item: &serde_json::Value| {
                              let label = item.get("label")?.as_str()?.to_string();
-                             let kind_int = item.get("kind").and_then(|k| k.as_i64()).unwrap_or(1);
+                             let kind_int = item.get("kind").and_then(|k: &serde_json::Value| k.as_i64()).unwrap_or(1);
                              let kind = match kind_int {
                                  2 | 3 => CompletionKind::Function,
                                  6 => CompletionKind::Variable,
@@ -151,7 +151,7 @@ impl LspManager {
                                  14 => CompletionKind::Keyword,
                                  _ => CompletionKind::Text,
                              };
-                             let detail = item.get("detail").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                             let detail = item.get("detail").and_then(|s: &serde_json::Value| s.as_str()).unwrap_or("").to_string();
                              
                              Some(CompletionItem {
                                  label,

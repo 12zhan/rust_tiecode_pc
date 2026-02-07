@@ -563,7 +563,8 @@ pub const JIESHENG_GRAMMAR: &str = r##"{
           "styles": [1, "punctuation", 2, "keyword"],
           "state": "default"
         }
-      ]
+      ],
+      "onLineEndState": "multiLineEmbedCode"
     }
   }
 }"##;

@@ -1,11 +1,36 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tiecode_plugin_api::PluginManifest;
+use tiecode_plugin_api::{PluginManifest, CommandContribution};
 use gpui::*;
+
+pub struct CommandRegistry {
+    commands: HashMap<String, CommandContribution>,
+}
+
+impl CommandRegistry {
+    pub fn new() -> Self {
+        Self {
+            commands: HashMap::new(),
+        }
+    }
+
+    pub fn register(&mut self, command: CommandContribution) {
+        self.commands.insert(command.command.clone(), command);
+    }
+
+    pub fn get(&self, id: &str) -> Option<&CommandContribution> {
+        self.commands.get(id)
+    }
+    
+    pub fn list(&self) -> Vec<&CommandContribution> {
+        self.commands.values().collect()
+    }
+}
 
 pub struct PluginManager {
     plugins: HashMap<String, PluginManifest>,
     plugin_dirs: Vec<PathBuf>,
+    pub command_registry: CommandRegistry,
 }
 
 impl PluginManager {
@@ -13,6 +38,7 @@ impl PluginManager {
         Self {
             plugins: HashMap::new(),
             plugin_dirs: Vec::new(),
+            command_registry: CommandRegistry::new(),
         }
     }
 
@@ -21,12 +47,39 @@ impl PluginManager {
     }
 
     pub fn discover_plugins(&mut self) {
-        // Implementation to scan directories and load manifests
-        // This is a placeholder
+        for dir in &self.plugin_dirs {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        let manifest_path = path.join("package.json");
+                        if manifest_path.exists() {
+                            match crate::plugin::manifest::PluginManifestLoader::load(&manifest_path) {
+                                Ok(manifest) => {
+                                    println!("Found plugin: {} ({})", manifest.id, manifest.version);
+                                    
+                                    // Auto-register commands from manifest
+                                    for cmd in &manifest.contributes.commands {
+                                        self.command_registry.register(cmd.clone());
+                                    }
+                                    
+                                    self.plugins.insert(manifest.id.clone(), manifest);
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to load plugin manifest at {:?}: {}", manifest_path, e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     pub fn activate_plugin(&self, plugin_id: &str) {
-        // Implementation to activate a plugin
-        println!("Activating plugin: {}", plugin_id);
+        if let Some(plugin) = self.plugins.get(plugin_id) {
+            println!("Activating plugin: {}", plugin.name);
+            // In a real implementation, this would start the plugin host/WASM module
+        }
     }
 }

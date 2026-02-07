@@ -150,8 +150,8 @@ impl Render for StatusBar {
         // Column is char offset from start of line
         let col = core.content.byte_to_char(head) - core.content.byte_to_char(line_start);
         
-        let line_display = line;
-        let col_display = col;
+        let line_display = line + 1;
+        let col_display = col + 1;
 
         let uri = &editor.lsp_manager.doc_uri;
         let language = Self::get_language(uri);

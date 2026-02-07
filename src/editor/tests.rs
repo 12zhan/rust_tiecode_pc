@@ -179,5 +179,4 @@ mod tests {
         core.replace_range(4..4, "s");
         assert!(core.marked_range.is_none(), "marked_range should be cleared after replace_range");
     }
-
 }

@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use similar::TextDiff;
+use std::process::Command;
+use url::Url;
 
 // Value and Url removed
 
@@ -83,6 +86,13 @@ pub enum DecorationColor {
     Custom(u32),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GitDiffStatus {
+    Added,
+    Modified,
+    Deleted,
+}
+
 impl DecorationColor {
     fn rgba(self) -> Rgba {
         match self {
@@ -140,6 +150,8 @@ pub struct CodeEditor {
     hover_popup: Option<HoverPopup>,
     pub lsp_manager: LspManager,
     completion_scroll_offset: f32,
+    pub git_diff_map: HashMap<usize, GitDiffStatus>,
+    pub git_base_content: Option<String>,
 }
 
 impl CodeEditor {
@@ -210,25 +222,91 @@ impl CodeEditor {
             hover_popup: None,
             lsp_manager: LspManager::new(doc_uri),
             completion_scroll_offset: 0.0,
+            git_diff_map: HashMap::new(),
+            git_base_content: None,
         };
 
         editor.init_lsp_and_spawn_loop(cx);
+        editor.fetch_git_base_content(cx);
+
         editor
     }
 
     fn init_lsp_and_spawn_loop(&mut self, _cx: &mut Context<Self>) {
-         self.lsp_manager.initialize(&self.core.content.to_string());
+        self.lsp_manager.initialize(&self.core.content.to_string());
+    }
+
+    pub fn fetch_git_base_content(&mut self, cx: &mut Context<Self>) {
+        if let Ok(url) = Url::parse(&self.lsp_manager.doc_uri) {
+            if let Ok(path) = url.to_file_path() {
+                if let Some(parent) = path.parent() {
+                    if let Some(file_name) = path.file_name() {
+                        let output = Command::new("git")
+                            .arg("show")
+                            .arg(format!("HEAD:./{}", file_name.to_string_lossy()))
+                            .current_dir(parent)
+                            .output();
+
+                        if let Ok(output) = output {
+                            if output.status.success() {
+                                if let Ok(content) = String::from_utf8(output.stdout) {
+                                    self.git_base_content = Some(content);
+                                    self.update_git_diff(cx);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.git_base_content = None;
+        self.update_git_diff(cx);
+    }
+
+    pub fn update_git_diff(&mut self, cx: &mut Context<Self>) {
+        self.git_diff_map.clear();
+        
+        if let Some(base) = &self.git_base_content {
+            let current = self.core.content.to_string();
+            let diff = TextDiff::from_lines(base, &current);
+            
+            for op in diff.ops() {
+                match op.tag() {
+                    similar::DiffTag::Delete => {
+                        // println!("Diff: Deleted at {}", op.new_range().start);
+                        if op.new_range().start <= self.core.content.len_lines() {
+                             self.git_diff_map.insert(op.new_range().start, GitDiffStatus::Deleted);
+                        }
+                    }
+                    similar::DiffTag::Insert => {
+                        // println!("Diff: Inserted at {:?}", op.new_range());
+                        for i in op.new_range() {
+                            self.git_diff_map.insert(i, GitDiffStatus::Added);
+                        }
+                    }
+                    similar::DiffTag::Replace => {
+                        // println!("Diff: Modified at {:?}", op.new_range());
+                        for i in op.new_range() {
+                            self.git_diff_map.insert(i, GitDiffStatus::Modified);
+                        }
+                    }
+                    similar::DiffTag::Equal => {}
+                }
+            }
+        }
+        cx.notify();
     }
 
     pub fn perform_undo(&mut self, cx: &mut Context<Self>) {
         self.core.undo();
-        self.sync_sweetline_document();
+        self.sync_sweetline_document(cx);
         cx.notify();
     }
 
     pub fn perform_redo(&mut self, cx: &mut Context<Self>) {
         self.core.redo();
-        self.sync_sweetline_document();
+        self.sync_sweetline_document(cx);
         cx.notify();
     }
 
@@ -255,7 +333,7 @@ impl CodeEditor {
     pub fn perform_cut(&mut self, cx: &mut Context<Self>) {
         self.perform_copy(cx);
         self.core.delete_selection();
-        self.sync_sweetline_document();
+        self.sync_sweetline_document(cx);
         cx.notify();
     }
 
@@ -336,14 +414,15 @@ impl CodeEditor {
         self.core.set_cursor(0);
         self.decorations.clear();
         self.hover_popup = None;
-        self.sync_sweetline_document();
+        self.fetch_git_base_content(cx);
+        self.sync_sweetline_document(cx);
 
         cx.notify();
     }
 
     pub fn set_content(&mut self, content: String, cx: &mut Context<Self>) {
         self.core.content = Rope::from(content.clone());
-        self.sync_sweetline_document();
+        self.sync_sweetline_document(cx);
         self.core.set_cursor(0);
         
         self.lsp_manager.notify_change(&content);
@@ -366,7 +445,7 @@ impl CodeEditor {
 
     pub fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.core.insert_text(text);
-        self.sync_sweetline_document();
+        self.sync_sweetline_document(cx);
         self.notify_lsp_change(text);
         self.update_completion(cx);
         cx.notify();
@@ -380,7 +459,7 @@ impl CodeEditor {
     #[allow(dead_code)]
     pub fn delete_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
         self.core.delete_range(range);
-        self.sync_sweetline_document();
+        self.sync_sweetline_document(cx);
         self.notify_lsp_change("");
         self.update_completion(cx);
         cx.notify();
@@ -569,7 +648,7 @@ impl CodeEditor {
             }
 
             self.core.replace_range(word_start..cursor, &label);
-            self.sync_sweetline_document();
+            self.sync_sweetline_document(cx);
             self.update_completion(cx);
 
             self.core.completion_active = false;
@@ -593,7 +672,7 @@ impl CodeEditor {
             }
         }
         self.core.delete_selection();
-        self.sync_sweetline_document();
+        self.sync_sweetline_document(cx);
         self.update_completion(cx);
         cx.notify();
     }
@@ -608,7 +687,7 @@ impl CodeEditor {
             }
         }
         self.core.delete_selection();
-        self.sync_sweetline_document();
+        self.sync_sweetline_document(cx);
         self.update_completion(cx);
         cx.notify();
     }
@@ -653,7 +732,7 @@ impl CodeEditor {
         self.core.merge_selections(); // Merge overlapping lines
 
         self.core.delete_selection();
-        self.sync_sweetline_document();
+        self.sync_sweetline_document(cx);
         cx.notify();
     }
 
@@ -687,14 +766,14 @@ impl CodeEditor {
 
     fn undo(&mut self, _: &Undo, _window: &mut Window, cx: &mut Context<Self>) {
         self.core.undo();
-        self.sync_sweetline_document();
+        self.sync_sweetline_document(cx);
         self.update_completion(cx);
         cx.notify();
     }
 
     fn redo(&mut self, _: &Redo, _window: &mut Window, cx: &mut Context<Self>) {
         self.core.redo();
-        self.sync_sweetline_document();
+        self.sync_sweetline_document(cx);
         self.update_completion(cx);
         cx.notify();
     }
@@ -723,7 +802,7 @@ impl CodeEditor {
     fn cut(&mut self, _: &Cut, _window: &mut Window, cx: &mut Context<Self>) {
         self.copy(&Copy, _window, cx);
         self.core.delete_selection();
-        self.sync_sweetline_document();
+        self.sync_sweetline_document(cx);
         cx.notify();
     }
 
@@ -1087,7 +1166,7 @@ impl CodeEditor {
         line
     }
 
-    fn sync_sweetline_document(&mut self) {
+    fn sync_sweetline_document(&mut self, cx: &mut Context<Self>) {
         let text = self.core.content.to_string();
 
         let _ = self.sweetline_engine.remove_document(&self.lsp_manager.doc_uri);
@@ -1101,6 +1180,7 @@ impl CodeEditor {
         self.sweetline_analyzer = Some(analyzer);
 
         self.update_highlights();
+        self.update_git_diff(cx);
     }
 
     fn update_highlights(&mut self) {
@@ -1316,6 +1396,15 @@ impl CodeEditor {
         if char_idx == 0 {
             return 0;
         }
+        
+        // Check for CRLF
+        let prev_char = content.char(char_idx - 1);
+        if prev_char == '\n' && char_idx > 1 {
+            if content.char(char_idx - 2) == '\r' {
+                return content.char_to_byte(char_idx - 2);
+            }
+        }
+        
         content.char_to_byte(char_idx - 1)
     }
 
@@ -1324,6 +1413,19 @@ impl CodeEditor {
             return content.len_bytes();
         }
         let char_idx = content.byte_to_char(index);
+        
+        // Check for CRLF
+        let curr_char = content.char(char_idx);
+        if curr_char == '\r' {
+            if char_idx + 1 < content.len_chars() && content.char(char_idx + 1) == '\n' {
+                 // Skip both \r and \n
+                 if char_idx + 2 >= content.len_chars() {
+                     return content.len_bytes();
+                 }
+                 return content.char_to_byte(char_idx + 2);
+            }
+        }
+
         if char_idx + 1 >= content.len_chars() {
             return content.len_bytes();
         }
@@ -1483,7 +1585,7 @@ impl EntityInputHandler for CodeEditor {
 
         self.core.replace_range(range, new_text);
         // self.core.replace_range already clears marked_range
-        self.sync_sweetline_document();
+        self.sync_sweetline_document(cx);
 
         self.update_completion(cx);
         cx.notify();
@@ -1512,7 +1614,7 @@ impl EntityInputHandler for CodeEditor {
         }
 
         self.core.replace_range(range.clone(), new_text);
-        self.sync_sweetline_document();
+        self.sync_sweetline_document(cx);
 
         if !new_text.is_empty() {
             let new_end = range.start + new_text.len();
@@ -1927,6 +2029,7 @@ pub fn code_editor_canvas(
                 completion_index,
                 decorations,
                 hover_popup,
+                git_diff_map,
             ) = {
                 let state = editor.read(cx);
                 (
@@ -1938,6 +2041,7 @@ pub fn code_editor_canvas(
                     state.core.completion_index,
                     state.decorations.clone(),
                     state.hover_popup.clone(),
+                    state.git_diff_map.clone(),
                 )
             };
 
@@ -1980,6 +2084,20 @@ pub fn code_editor_canvas(
                 // 2. Draw Gutter
                 for i in start_line..end_line {
                     let y = layout.line_y(bounds, i);
+
+                    if let Some(status) = git_diff_map.get(&i) {
+                         let color = match status {
+                             GitDiffStatus::Added => rgb(0x2ea043),
+                             GitDiffStatus::Modified => rgb(0x005cc5),
+                             GitDiffStatus::Deleted => rgb(0xd73a49),
+                         };
+                         let indicator_bounds = Bounds::from_corners(
+                             point(bounds.left() + px(2.0), y),
+                             point(bounds.left() + px(6.0), y + line_height),
+                         );
+                         window.paint_quad(fill(indicator_bounds, color));
+                    }
+
                     let number_text = format!("{}", i + 1);
                     let number_line = CodeEditor::shape_line(
                         window,
@@ -1994,6 +2112,24 @@ pub fn code_editor_canvas(
                     number_line
                         .paint(point(number_x, y), line_height, window, cx)
                         .ok();
+                }
+
+                // Check for diff marker at end of file (deleted content after last line)
+                let last_line_idx = content.len_lines();
+                if end_line == last_line_idx {
+                    if let Some(status) = git_diff_map.get(&last_line_idx) {
+                         let color = match status {
+                             GitDiffStatus::Added => rgb(0x2ea043),
+                             GitDiffStatus::Modified => rgb(0x005cc5),
+                             GitDiffStatus::Deleted => rgb(0xd73a49),
+                         };
+                         let y = layout.line_y(bounds, last_line_idx);
+                         let indicator_bounds = Bounds::from_corners(
+                             point(bounds.left() + px(2.0), y),
+                             point(bounds.left() + px(6.0), y + line_height),
+                         );
+                         window.paint_quad(fill(indicator_bounds, color));
+                    }
                 }
 
                 // 3. Draw Text Area

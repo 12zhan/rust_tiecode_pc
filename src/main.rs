@@ -159,7 +159,7 @@ fn main() {
                 let file_tree = cx.new(|cx| FileTree::new(None, cx));
                 let command_palette = cx.new(CommandPalette::new);
                 let plugin_manager = cx.new(|_| PluginManager::new());
-                let status_bar = cx.new(|cx| StatusBar::new(editor.clone()));
+                let status_bar = cx.new(|cx| StatusBar::new(editor.clone(), cx));
                 
                 plugin_manager.update(cx, |manager: &mut PluginManager, _cx| {
                     manager.discover_plugins();

@@ -2069,15 +2069,34 @@ pub fn code_editor_canvas(
                 let end_line =
                     (layout.line_index_for_y(bounds, bounds.bottom()) + 1).min(line_count);
 
-                // 1. Draw Global Backgrounds (Current Line Highlight)
+                // 1. Draw Global Backgrounds (Current Line Highlight and Git Diff Backgrounds)
                 for i in start_line..end_line {
                     let y = layout.line_y(bounds, i);
+                    
+                    // Current Line Highlight
                     if i == current_line {
                         let highlight_bounds = Bounds::from_corners(
                             point(bounds.left(), y),
                             point(bounds.right(), y + line_height),
                         );
                         window.paint_quad(fill(highlight_bounds, rgba(0xffffff0d)));
+                    }
+
+                    // Git Diff Background Highlight
+                    if let Some(status) = git_diff_map.get(&i) {
+                         let bg_color = match status {
+                             GitDiffStatus::Added => Some(rgba(0x2ea04333)), // Green with ~20% opacity
+                             GitDiffStatus::Modified => Some(rgba(0x005cc533)), // Blue with ~20% opacity
+                             GitDiffStatus::Deleted => None, // Do not highlight background for deletions (since text is gone)
+                         };
+                         
+                         if let Some(color) = bg_color {
+                             let highlight_bounds = Bounds::from_corners(
+                                 point(bounds.left(), y),
+                                 point(bounds.right(), y + line_height),
+                             );
+                             window.paint_quad(fill(highlight_bounds, color));
+                         }
                     }
                 }
 
@@ -2112,6 +2131,31 @@ pub fn code_editor_canvas(
                     number_line
                         .paint(point(number_x, y), line_height, window, cx)
                         .ok();
+                    
+                    // Draw Diff Symbols (+/~)
+                    if let Some(status) = git_diff_map.get(&i) {
+                         let (symbol, color) = match status {
+                             GitDiffStatus::Added => (Some("+"), rgb(0x2ea043)),
+                             GitDiffStatus::Modified => (Some("~"), rgb(0x005cc5)),
+                             GitDiffStatus::Deleted => (None, rgb(0xd73a49)),
+                         };
+                         
+                         if let Some(sym) = symbol {
+                             let symbol_line = CodeEditor::shape_line(
+                                 window,
+                                 sym,
+                                 color.into(),
+                                 font_size * 0.8, // Slightly smaller
+                             );
+                             // Position symbol between left edge and line number
+                             // Or maybe just replace line number? Usually it's next to it.
+                             // Let's put it at left edge + padding
+                             let symbol_x = bounds.left() + px(10.0);
+                             symbol_line
+                                 .paint(point(symbol_x, y + px(1.0)), line_height, window, cx)
+                                 .ok();
+                         }
+                    }
                 }
 
                 // Check for diff marker at end of file (deleted content after last line)

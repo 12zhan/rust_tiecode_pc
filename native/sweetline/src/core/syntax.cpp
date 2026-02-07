@@ -409,6 +409,7 @@ namespace NS_SWEETLINE
       }
       if (state_json.is_object() && state_json.contains("reference"))
       {
+        bool reference_loaded = false;
         if (m_provider_)
         {
           U8String ref_name = state_json["reference"];
@@ -416,10 +417,22 @@ namespace NS_SWEETLINE
           if (source_rule)
           {
             mergeSyntaxRule(rule, source_rule, key + "_", key);
+            reference_loaded = true;
           }
         }
 
         int32_t state_id = rule->getOrCreateStateId(key);
+        // Fallback: If reference not found, add a default rule to prevent empty state error
+        if (!reference_loaded) {
+            StateRule &state = rule->getStateRule(state_id);
+            if (state.token_rules.empty()) {
+                TokenRule fallback;
+                fallback.pattern = "."; // Match any character (fallback)
+                state.token_rules.push_back(fallback);
+                compileStatePattern(state);
+            }
+        }
+        
         if (rule->containsRule(state_id))
         {
           StateRule &state = rule->getStateRule(state_id);

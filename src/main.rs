@@ -22,6 +22,7 @@ use tiecode_plugin_api::CommandContribution;
 use anyhow::Result;
 use gpui::*;
 use log::*;
+use image::GenericImageView;
 use std::fs;
 use std::path::PathBuf;
 
@@ -213,6 +214,11 @@ fn main() {
                         title: "Exit".to_string(),
                         category: Some("File".to_string()),
                     });
+                    manager.command_registry.register(CommandContribution {
+                        command: "view.set_background".to_string(),
+                        title: "Set Background Image".to_string(),
+                        category: Some("View".to_string()),
+                    });
                 });
 
                 cx.new(|cx| {
@@ -298,6 +304,7 @@ fn main() {
                         ],
                         needs_focus_restore: false,
                         needs_initial_focus: true,
+                        background_image: None,
                     }
                 })
             },
@@ -327,6 +334,7 @@ struct StartWindow {
     _subscriptions: Vec<Subscription>,
     needs_focus_restore: bool,
     needs_initial_focus: bool,
+    background_image: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -507,6 +515,48 @@ impl StartWindow {
             "core.exit" => {
                 std::process::exit(0);
             }
+            "view.set_background" => {
+                cx.spawn(|view: WeakEntity<StartWindow>, cx: &mut AsyncApp| {
+                    let mut cx = cx.clone();
+                    async move {
+                        let task = rfd::AsyncFileDialog::new()
+                            .add_filter("Image", &["png", "jpg", "jpeg", "webp"])
+                            .pick_file();
+                        
+                        if let Some(file) = task.await {
+                            let path = file.path().to_path_buf();
+                            
+                            // Optimization: Resize large images to reduce memory usage
+                            // 200MB+ memory usage is usually due to 4K+ textures.
+                            // Resizing to max 1920x1080 significantly reduces memory while keeping acceptable quality.
+                            let final_path = if let Ok(img) = image::open(&path) {
+                                let (width, height) = img.dimensions();
+                                if width > 1920 || height > 1080 {
+                                    let resized = img.resize(1920, 1080, image::imageops::FilterType::Lanczos3);
+                                    let temp_path = std::env::temp_dir().join("tiecode_bg_cache.jpg");
+                                    if let Ok(_) = resized.save(&temp_path) {
+                                        temp_path
+                                    } else {
+                                        path
+                                    }
+                                } else {
+                                    path
+                                }
+                            } else {
+                                path
+                            };
+
+                            view.update(&mut cx, |this: &mut StartWindow, cx: &mut Context<StartWindow>| {
+                                this.background_image = Some(final_path);
+                                this.file_tree.update(cx, |tree: &mut FileTree, cx: &mut Context<FileTree>| {
+                                    tree.set_transparent(true, cx);
+                                });
+                                cx.notify();
+                            }).ok();
+                        }
+                    }
+                }).detach();
+            }
             _ => {
                 println!("Executing command: {}", command_id);
                 // Future: Delegate to plugin manager
@@ -517,6 +567,14 @@ impl StartWindow {
 
 impl Render for StartWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let has_bg = self.background_image.is_some();
+        let alpha = if has_bg { 0xcc } else { 0xff };
+        let tabs_bar_bg = if has_bg { rgba(0x1f242800 | alpha) } else { rgb(0xff1f2428) };
+        let tab_active_bg = if has_bg { rgba(0x2d353b00 | alpha) } else { rgb(0xff2d353b) };
+        let title_bar_bg = if has_bg { rgba(0x232a2e00 | alpha) } else { rgb(0xff232a2e) };
+        let main_content_bg = if has_bg { rgba(0x2d353b00 | alpha) } else { rgb(0xff2d353b) };
+        let file_tree_bg = if has_bg { rgba(0x25252600 | alpha) } else { rgb(0xff252526) };
+        
         let view = cx.entity();
         let view_for_focus = view.clone();
         let file_tree_view = self.file_tree.read(cx);
@@ -548,7 +606,7 @@ impl Render for StartWindow {
             .h(px(28.0))
             .flex()
             .items_center()
-            .bg(rgb(0xff1f2428))
+            .bg(tabs_bar_bg)
             .border_b_1()
             .border_color(rgb(0xff3c474d))
             .px(px(6.0));
@@ -576,7 +634,7 @@ impl Render for StartWindow {
                     rgb(0xffa9b1b6)
                 })
                 .bg(if is_active {
-                    rgb(0xff2d353b)
+                    tab_active_bg
                 } else {
                     rgba(0x00000000)
                 })
@@ -648,9 +706,8 @@ impl Render for StartWindow {
             None => ("确认".to_string(), div().into_any_element()),
         };
 
-        div()
+        let content = div()
             .relative()
-            .bg(rgb(0xFFFFFFFF))
             .flex()
             .flex_col()
             .w_full()
@@ -693,7 +750,7 @@ impl Render for StartWindow {
                 div()
                     .w_full()
                     .h(px(30.0))
-                    .bg(rgb(0xff232a2e))
+                    .bg(title_bar_bg)
                     .window_control_area(WindowControlArea::Drag)
                     .flex()
                     .justify_between()
@@ -711,7 +768,7 @@ impl Render for StartWindow {
                     .flex_1()
                     .flex()
                     .w_full()
-                    .bg(rgb(0xff2d353b))
+                    .bg(main_content_bg)
                     .child(
                         if file_tree_visible {
                             div()
@@ -719,7 +776,7 @@ impl Render for StartWindow {
                                 .h_full()
                                 .border_r_1()
                                 .border_color(rgb(0xff3c474d))
-                                .bg(rgb(0xff252526))
+                                .bg(file_tree_bg)
                                 .child(self.file_tree.clone())
                         } else {
                             div()
@@ -1068,6 +1125,27 @@ impl Render for StartWindow {
                             cx.notify();
                         });
                     }),
-            )
+            );
+
+        if let Some(bg_path) = self.background_image.clone() {
+            div()
+                .size_full()
+                .child(
+                    img(bg_path)
+                        .absolute()
+                        .size_full()
+                        .object_fit(ObjectFit::Cover)
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .size_full()
+                        .bg(rgba(0x00000080))
+                )
+                .child(content)
+                .into_any_element()
+        } else {
+            content.bg(rgb(0xFFFFFFFF)).into_any_element()
+        }
     }
 }

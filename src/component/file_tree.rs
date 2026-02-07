@@ -70,6 +70,7 @@ pub struct FileTree {
     animating: bool,
     pending_new_item: Option<InlineNewItem>,
     virtual_nodes: HashMap<PathBuf, Vec<VirtualNode>>,
+    transparent: bool,
 }
 
 impl EventEmitter<FileTreeEvent> for FileTree {}
@@ -96,6 +97,7 @@ impl FileTree {
             animating: false,
             pending_new_item: None,
             virtual_nodes: HashMap::new(),
+            transparent: false,
         };
         tree.refresh_internal(false);
         tree.ensure_fs_watch(cx);
@@ -284,6 +286,13 @@ impl FileTree {
         });
         self.list_state.splice(insert_index..insert_index, 1);
         cx.notify();
+    }
+
+    pub fn set_transparent(&mut self, transparent: bool, cx: &mut Context<Self>) {
+        if self.transparent != transparent {
+            self.transparent = transparent;
+            cx.notify();
+        }
     }
 
     pub fn focus(&self, window: &mut Window) {
@@ -599,7 +608,7 @@ impl FileTree {
 
 impl Render for FileTree {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme_surface = rgb(0xff252526);
+        let theme_surface = if self.transparent { rgba(0x00000000) } else { rgb(0xff252526) };
         let drop_highlight = rgb(0xff3c474d);
         let visible_entries = self.visible_entries.clone();
         let drag_hover = self.drag_hover.clone();

@@ -160,6 +160,8 @@ fn main() {
                 }); */
                 let file_tree = cx.new(|cx| FileTree::new(None, cx));
                 let command_palette = cx.new(CommandPalette::new);
+                let image_viewer = cx.new(|cx| crate::component::image_viewer::ImageViewer::new(cx));
+                let markdown_viewer = cx.new(|cx| crate::component::markdown_viewer::MarkdownViewer::new(cx));
                 let plugin_manager = cx.new(|_| PluginManager::new());
                 let status_bar = cx.new(|cx| StatusBar::new(editor.clone(), cx));
                 
@@ -285,6 +287,8 @@ fn main() {
                         command_palette,
                         plugin_manager,
                         status_bar,
+                        image_viewer,
+                        markdown_viewer,
                         file_tree_visible: true,
                         open_tabs: Vec::new(),
                         active_tab: None,
@@ -319,6 +323,8 @@ struct StartWindow {
     command_palette: Entity<CommandPalette>,
     plugin_manager: Entity<PluginManager>,
     status_bar: Entity<StatusBar>,
+    image_viewer: Entity<crate::component::image_viewer::ImageViewer>,
+    markdown_viewer: Entity<crate::component::markdown_viewer::MarkdownViewer>,
     file_tree_visible: bool,
     open_tabs: Vec<PathBuf>,
     active_tab: Option<PathBuf>,
@@ -345,8 +351,41 @@ enum ConfirmAction {
 }
 
 impl StartWindow {
+    fn is_image_path(path: &PathBuf) -> bool {
+        match path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()) {
+            Some(ext) => matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif"),
+            None => false,
+        }
+    }
+    fn is_markdown_path(path: &PathBuf) -> bool {
+        match path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()) {
+            Some(ext) => matches!(ext.as_str(), "md" | "markdown"),
+            None => false,
+        }
+    }
+
     fn open_file_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if let Ok(content) = std::fs::read_to_string(&path) {
+        if Self::is_image_path(&path) {
+            self.image_viewer.update(cx, |viewer, cx| {
+                viewer.open_image(path.clone(), cx);
+            });
+            if !self.open_tabs.iter().any(|p| p == &path) {
+                self.open_tabs.push(path.clone());
+            }
+            self.active_tab = Some(path);
+            cx.notify();
+        } else if Self::is_markdown_path(&path) {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                self.markdown_viewer.update(cx, |viewer, cx| {
+                    viewer.set_content(content, cx);
+                });
+                if !self.open_tabs.iter().any(|p| p == &path) {
+                    self.open_tabs.push(path.clone());
+                }
+                self.active_tab = Some(path);
+                cx.notify();
+            }
+        } else if let Ok(content) = std::fs::read_to_string(&path) {
             self.editor.update(cx, |editor, cx| {
                 editor.open_file(path.clone(), content, cx);
             });
@@ -801,7 +840,19 @@ impl Render for StartWindow {
                             .flex_col()
                             .h_full()
                             .child(tabs_bar)
-                            .child(div().flex_1().child(self.editor.clone()))
+                            .child({
+                                let is_image = self.active_tab.as_ref().map(|p| Self::is_image_path(p)).unwrap_or(false);
+                                if is_image {
+                                    div().flex_1().child(self.image_viewer.clone())
+                                } else {
+                                    let is_md = self.active_tab.as_ref().map(|p| Self::is_markdown_path(p)).unwrap_or(false);
+                                    if is_md {
+                                        div().flex_1().child(self.markdown_viewer.clone())
+                                    } else {
+                                        div().flex_1().child(self.editor.clone())
+                                    }
+                                }
+                            })
                     ),
             )
             .child(self.status_bar.clone())

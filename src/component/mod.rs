@@ -6,6 +6,8 @@ pub mod modal;
 pub mod popover;
 pub mod tie_svg;
 pub mod status_bar;
+pub mod image_viewer;
+pub mod markdown_viewer;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 

@@ -1275,6 +1275,8 @@ impl CodeEditor {
         if let Some(analyzer) = &self.sweetline_analyzer {
             let result = analyzer.analyze();
             self.cached_highlights = DocumentAnalyzer::parse_result(&result, false);
+            self.cached_highlights
+                .sort_by(|a, b| (a.end_index, a.start_index).cmp(&(b.end_index, b.start_index)));
 
             // Update style cache
             for span in &self.cached_highlights {
@@ -1292,6 +1294,24 @@ impl CodeEditor {
             if let Ok(mut cache) = self.render_cache.lock() {
                 cache.clear();
             }
+        }
+    }
+
+    fn update_highlights_from_result(&mut self, result: Vec<i32>) {
+        self.cached_highlights = DocumentAnalyzer::parse_result(&result, false);
+        self.cached_highlights
+            .sort_by(|a, b| (a.end_index, a.start_index).cmp(&(b.end_index, b.start_index)));
+        for span in &self.cached_highlights {
+            if !self.style_cache.contains_key(&span.style_id) {
+                if let Some(name) = self.sweetline_engine.get_style_name(span.style_id) {
+                    if let Some(color) = self.color_for_style(&name) {
+                        self.style_cache.insert(span.style_id, color);
+                    }
+                }
+            }
+        }
+        if let Ok(mut cache) = self.render_cache.lock() {
+            cache.clear();
         }
     }
 
@@ -1689,15 +1709,37 @@ impl EntityInputHandler for CodeEditor {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let range = range_utf16
+        let mut range = range_utf16
             .as_ref()
             .map(|range_utf16| self.core.range_from_utf16(range_utf16))
             .or(self.core.marked_range.clone())
             .unwrap_or(self.core.primary_selection().range());
 
-        self.core.replace_range(range, new_text);
-        // self.core.replace_range already clears marked_range
-        self.sync_sweetline_document(cx);
+        let content_len = self.core.content.len_bytes();
+        if range.start > content_len || range.end > content_len {
+            range.start = range.start.min(content_len);
+            range.end = range.end.min(content_len);
+        }
+
+        // Compute incremental range BEFORE applying edit
+        let (start_line, start_col) = self.lsp_position_for_index(range.start);
+        let (end_line, end_col) = self.lsp_position_for_index(range.end);
+
+        self.core.replace_range(range.clone(), new_text);
+
+        // Incremental analyze to avoid full-document reload
+        if let Some(analyzer) = &self.sweetline_analyzer {
+            let result = analyzer.analyze_incremental(
+                start_line,
+                start_col,
+                end_line,
+                end_col,
+                new_text,
+            );
+            self.update_highlights_from_result(result);
+        } else {
+            self.sync_sweetline_document(cx);
+        }
 
         self.update_completion(cx);
         cx.notify();
@@ -1725,8 +1767,24 @@ impl EntityInputHandler for CodeEditor {
             range.end = range.end.min(content_len);
         }
 
+        // Compute incremental range BEFORE applying edit
+        let (start_line, start_col) = self.lsp_position_for_index(range.start);
+        let (end_line, end_col) = self.lsp_position_for_index(range.end);
+
         self.core.replace_range(range.clone(), new_text);
-        self.sync_sweetline_document(cx);
+
+        if let Some(analyzer) = &self.sweetline_analyzer {
+            let result = analyzer.analyze_incremental(
+                start_line,
+                start_col,
+                end_line,
+                end_col,
+                new_text,
+            );
+            self.update_highlights_from_result(result);
+        } else {
+            self.sync_sweetline_document(cx);
+        }
 
         if !new_text.is_empty() {
             let new_end = range.start + new_text.len();

@@ -5,6 +5,8 @@ mod editor;
 mod plugin;
 mod panic_handler;
 
+//DEMO
+
 use component::{
     command_palette::{CommandPalette, CommandPaletteEvent},
     file_tree::{file_icon, FileTree, FileTreeEvent},
@@ -437,6 +439,10 @@ impl StartWindow {
             let content = self.editor.read(cx).core.content.to_string();
             if let Err(e) = std::fs::write(path, content) {
                 println!("Failed to save file: {}", e);
+            } else {
+                if let Some(git_panel) = self.tool_panel.read(cx).git_panel() {
+                    git_panel.update(cx, |panel, _| panel.refresh());
+                }
             }
         }
     }

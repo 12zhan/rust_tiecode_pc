@@ -534,10 +534,93 @@ impl Render for CommandPalette {
                                     .px(px(8.0))
                                     .py(px(4.0))
                                     .text_color(theme_text)
-                                    .child(if self.input.is_empty() {
-                                        "Type a command...".to_string()
-                                    } else {
-                                        self.input.clone()
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .children({
+                                        if self.input.is_empty() {
+                                            vec![div().child("Type a command...")]
+                                        } else {
+                                            let mut children = Vec::new();
+                                            let msg = self.input.clone();
+                                            
+                                            // Prioritize marked range (IME), then selection
+                                            let (range, is_marked) = if let Some(r) = &self.input_marked_range {
+                                                (Some(r.clone()), true)
+                                            } else if let Some(r) = &self.input_selection {
+                                                (Some(r.clone()), false)
+                                            } else {
+                                                (None, false)
+                                            };
+
+                                            if let Some(range) = range {
+                                                let start = Self::utf16_index_to_byte(&msg, range.start).min(msg.len());
+                                                let end = Self::utf16_index_to_byte(&msg, range.end).min(msg.len());
+                                                
+                                                if start > 0 {
+                                                    children.push(div().child(msg[..start].to_string()));
+                                                }
+                                                if start < end {
+                                                    let mut segment = div().child(msg[start..end].to_string());
+                                                    if is_marked {
+                                                        segment = segment.border_b_1().border_color(theme_text);
+                                                    } else {
+                                                        segment = segment.bg(rgb(0xff264f78)); // Selection color
+                                                    }
+                                                    children.push(segment);
+                                                }
+                                                if end < msg.len() {
+                                                    children.push(div().child(msg[end..].to_string()));
+                                                }
+                                            } else {
+                                                children.push(div().child(msg));
+                                            }
+                                            children
+                                        }
+                                    })
+                                    .on_mouse_down(MouseButton::Left, {
+                                        let input_focus = input_focus.clone();
+                                        let palette = palette.clone();
+                                        move |event, window, cx| {
+                                            input_focus.focus(window);
+                                            
+                                            let index = {
+                                                let palette_view = palette.read(cx);
+                                                if let Some(bounds) = palette_view.input_bounds {
+                                                    let msg = palette_view.input.clone();
+                                                    let style = window.text_style();
+                                                    let font_size = px(14.0);
+                                                    
+                                                    let run = TextRun {
+                                                        len: msg.len(),
+                                                        font: style.font(),
+                                                        color: Hsla::default(),
+                                                        background_color: None,
+                                                        underline: None,
+                                                        strikethrough: None,
+                                                    };
+                                                    
+                                                    let line = window.text_system().shape_line(
+                                                        SharedString::from(msg.clone()),
+                                                        font_size,
+                                                        &[run],
+                                                        None,
+                                                    );
+                                                    
+                                                    let local_x = event.position.x - bounds.left() - px(8.0);
+                                                    line.index_for_x(local_x)
+                                                } else {
+                                                    None
+                                                }
+                                            };
+                                            
+                                            if let Some(index) = index {
+                                                palette.update(cx, |this, cx| {
+                                                    this.input_cursor = index.min(this.input.len());
+                                                    this.input_selection = None;
+                                                    cx.notify();
+                                                });
+                                            }
+                                        }
                                     }),
                             )
                             .child(
@@ -554,6 +637,40 @@ impl Render for CommandPalette {
                                                 ElementInputHandler::new(bounds, palette.clone()),
                                                 cx,
                                             );
+                                            
+                                            // Draw cursor if focused
+                                            if input_focus.is_focused(window) {
+                                                let (msg, cursor) = palette.update(cx, |this, _| {
+                                                    (this.input.clone(), this.input_cursor)
+                                                });
+                                                
+                                                let style = window.text_style();
+                                                let font_size = px(14.0);
+                                                let run = TextRun {
+                                                    len: msg.len(),
+                                                    font: style.font(),
+                                                    color: theme_text.into(),
+                                                    background_color: None,
+                                                    underline: None,
+                                                    strikethrough: None,
+                                                };
+                                                let line = window.text_system().shape_line(
+                                                    SharedString::from(msg),
+                                                    font_size,
+                                                    &[run],
+                                                    None,
+                                                );
+                                                
+                                                let cursor_idx = cursor.min(line.len());
+                                                let x = line.x_for_index(cursor_idx) + px(8.0) + bounds.left();
+                                                let y_start = bounds.top() + px(4.0);
+                                                let height = px(16.0); // Approx line height
+                                                
+                                                window.paint_quad(fill(
+                                                    Bounds::new(point(x, y_start), size(px(1.5), height)),
+                                                    rgb(0xff007fd4),
+                                                ));
+                                            }
                                         }
                                     },
                                 )

@@ -8,6 +8,38 @@ pub mod tie_svg;
 pub mod status_bar;
 pub mod image_viewer;
 pub mod markdown_viewer;
+pub mod tool_panel;
+pub mod git_panel;
+
+pub mod mod_rs_helpers {
+    use std::ops::Range;
+    pub fn utf16_index_to_byte(text: &str, utf16_index: usize) -> usize {
+        let mut count = 0;
+        for (byte_index, ch) in text.char_indices() {
+            let next = count + ch.len_utf16();
+            if next > utf16_index {
+                return byte_index;
+            }
+            count = next;
+        }
+        text.len()
+    }
+    pub fn byte_index_to_utf16(text: &str, byte_index: usize) -> usize {
+        let mut count = 0;
+        for (i, ch) in text.char_indices() {
+            if i >= byte_index {
+                break;
+            }
+            count += ch.len_utf16();
+        }
+        count
+    }
+    pub fn byte_range_to_utf16_range(text: &str, range: Range<usize>) -> Range<usize> {
+        let start = byte_index_to_utf16(text, range.start);
+        let end = byte_index_to_utf16(text, range.end);
+        start..end
+    }
+}
 use std::ops::Range;
 use std::time::{Duration, Instant};
 

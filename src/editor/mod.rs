@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use similar::TextDiff;
 use std::process::Command;
 use url::Url;
@@ -626,7 +626,9 @@ impl CodeEditor {
                 word_start = current_idx;
             }
             
-            let prefix = content.slice(word_start..cursor).to_string();
+            let word_start_char = content.byte_to_char(word_start);
+            let cursor_char = content.byte_to_char(cursor);
+            let prefix = content.slice(word_start_char..cursor_char).to_string();
             
             if !prefix.is_empty() {
                 // Use LSP for completion

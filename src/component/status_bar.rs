@@ -196,5 +196,4 @@ impl Render for StatusBar {
     }
 }
 
-// Need to import tie_svg for the icon
-use crate::component::tie_svg;
+

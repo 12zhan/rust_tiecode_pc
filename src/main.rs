@@ -162,6 +162,11 @@ fn main() {
                 let command_palette = cx.new(CommandPalette::new);
                 let image_viewer = cx.new(|cx| crate::component::image_viewer::ImageViewer::new(cx));
                 let markdown_viewer = cx.new(|cx| crate::component::markdown_viewer::MarkdownViewer::new(cx));
+                let tool_panel = {
+                    let ft = file_tree.clone();
+                    cx.new(|cx| crate::component::tool_panel::ToolPanel::new(ft, cx))
+                };
+                let git_panel = cx.new(|cx| crate::component::git_panel::GitPanel::new(cx));
                 let plugin_manager = cx.new(|_| PluginManager::new());
                 let status_bar = cx.new(|cx| StatusBar::new(editor.clone(), cx));
                 
@@ -222,7 +227,19 @@ fn main() {
                         title: "Set Background Image".to_string(),
                         category: Some("View".to_string()),
                     });
+                    manager.register_tool_page("git", "Git", Some(PathBuf::from("assets/git.svg")));
                 });
+
+                {
+                    let pages = plugin_manager.read(cx).list_tool_pages().to_vec();
+                    tool_panel.update(cx, |panel, cx| {
+                        panel.attach_git_panel(git_panel.clone());
+                        for p in pages {
+                            panel.add_tool_page(p.id, p.label, p.icon_path);
+                        }
+                        cx.notify();
+                    });
+                }
 
                 cx.new(|cx| {
                     let subscription = cx.subscribe(&file_tree, |this: &mut StartWindow, _emitter, event: &FileTreeEvent, cx| {
@@ -289,6 +306,7 @@ fn main() {
                         status_bar,
                         image_viewer,
                         markdown_viewer,
+                        tool_panel,
                         file_tree_visible: true,
                         open_tabs: Vec::new(),
                         active_tab: None,
@@ -325,6 +343,7 @@ struct StartWindow {
     status_bar: Entity<StatusBar>,
     image_viewer: Entity<crate::component::image_viewer::ImageViewer>,
     markdown_viewer: Entity<crate::component::markdown_viewer::MarkdownViewer>,
+    tool_panel: Entity<crate::component::tool_panel::ToolPanel>,
     file_tree_visible: bool,
     open_tabs: Vec<PathBuf>,
     active_tab: Option<PathBuf>,
@@ -630,7 +649,7 @@ impl Render for StartWindow {
         let view_for_focus = view.clone();
         let file_tree_view = self.file_tree.read(cx);
         let file_tree = self.file_tree.clone();
-        let file_tree_for_drop = file_tree.clone();
+        let _file_tree_for_drop = file_tree.clone();
         let is_dragging = file_tree_view.is_dragging();
         let drag_source = file_tree_view.drag_source();
         let mouse_position = file_tree_view.mouse_position();
@@ -790,8 +809,17 @@ impl Render for StartWindow {
                 if let Some(path) = paths.paths().first() {
                      if path.is_dir() {
                          println!("Dropping folder: {:?}", path);
-                         file_tree_for_drop.update(cx, |tree, cx| {
+                         this.file_tree.update(cx, |tree, cx| {
                              tree.set_root_path(path.clone(), cx);
+                         });
+                         
+                         let path_clone = path.clone();
+                         this.tool_panel.update(cx, |panel, cx| {
+                            if let Some(git_panel) = panel.git_panel() {
+                                git_panel.update(cx, |gp, cx| {
+                                    gp.set_repo_root(path_clone, cx);
+                                });
+                            }
                          });
                      }
                 }
@@ -823,12 +851,12 @@ impl Render for StartWindow {
                     .child(
                         if file_tree_visible {
                             div()
-                                .w(px(250.0))
+                                .w(px(260.0))
                                 .h_full()
                                 .border_r_1()
                                 .border_color(rgb(0xff3c474d))
                                 .bg(file_tree_bg)
-                                .child(self.file_tree.clone())
+                                .child(self.tool_panel.clone())
                         } else {
                             div()
                         }

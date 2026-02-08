@@ -1,7 +1,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tiecode_plugin_api::{PluginManifest, CommandContribution};
-use gpui::*;
+
+#[derive(Clone)]
+pub struct ToolPageContribution {
+    pub id: String,
+    pub label: String,
+    pub icon_path: Option<PathBuf>,
+}
 
 pub struct CommandRegistry {
     commands: HashMap<String, CommandContribution>,
@@ -31,6 +37,7 @@ pub struct PluginManager {
     plugins: HashMap<String, PluginManifest>,
     plugin_dirs: Vec<PathBuf>,
     pub command_registry: CommandRegistry,
+    pub tool_pages: Vec<ToolPageContribution>,
 }
 
 impl PluginManager {
@@ -39,6 +46,7 @@ impl PluginManager {
             plugins: HashMap::new(),
             plugin_dirs: Vec::new(),
             command_registry: CommandRegistry::new(),
+            tool_pages: Vec::new(),
         }
     }
 
@@ -81,5 +89,17 @@ impl PluginManager {
             println!("Activating plugin: {}", plugin.name);
             // In a real implementation, this would start the plugin host/WASM module
         }
+    }
+
+    pub fn register_tool_page(&mut self, id: impl Into<String>, label: impl Into<String>, icon_path: Option<PathBuf>) {
+        self.tool_pages.push(ToolPageContribution {
+            id: id.into(),
+            label: label.into(),
+            icon_path,
+        });
+    }
+
+    pub fn list_tool_pages(&self) -> &[ToolPageContribution] {
+        &self.tool_pages
     }
 }

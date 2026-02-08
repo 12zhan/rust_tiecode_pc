@@ -1,6 +1,5 @@
 use gpui::*;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use tiecode::sweetline::{Engine, Document, DocumentAnalyzer, HighlightSpan};
 use crate::editor::grammar::*;
 
@@ -295,7 +294,7 @@ impl Render for MarkdownViewer {
                 window.paint_quad(fill(bounds, rgb(0xff2d353b)));
                 let font_size = px(13.0);
                 let line_height = font_size * 1.6;
-                let (scroll, mut content_h) = {
+                let (scroll, _) = {
                     let viewer = entity.read(cx);
                     (viewer.scroll_offset_y, viewer.content_height)
                 };
@@ -380,7 +379,7 @@ impl Render for MarkdownViewer {
                     }
                 });
                 let total_height = y_content - y0;
-                content_h = total_height;
+                let content_h = total_height;
                 // Clamp scroll offset based on content height
                 let max_scroll_y = (content_h - bounds.size.height + line_height).max(px(0.0));
                 let clamped_scroll = scroll.max(-max_scroll_y).min(px(0.0));

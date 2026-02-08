@@ -1,6 +1,5 @@
 use anyhow::Result;
 use serde_json::Value;
-use std::path::Path;
 
 pub struct LspPlugin {
     name: String,

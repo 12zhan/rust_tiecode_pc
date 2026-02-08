@@ -533,7 +533,7 @@ namespace NS_SWEETLINE
     int32_t line_change = m_document_->patch(range, new_text);
     size_t change_start_line = range.start.line;
     size_t change_end_line = static_cast<int32_t>(range.end.line) + line_change;
-    m_line_syntax_states_[change_start_line] = change_start_line > 0 ? m_line_syntax_states_[change_start_line - 1] : SyntaxRule::kDefaultStateId;
+    // m_line_syntax_states_[change_start_line] = change_start_line > 0 ? m_line_syntax_states_[change_start_line - 1] : SyntaxRule::kDefaultStateId;
     if (line_change < 0)
     {
       m_line_syntax_states_.erase(m_line_syntax_states_.begin() + range.end.line + line_change + 1,
@@ -548,7 +548,7 @@ namespace NS_SWEETLINE
     }
 
     // 从patch的起始行开始分析，直到状态稳定
-    int32_t current_state = m_line_syntax_states_[change_start_line];
+    int32_t current_state = change_start_line > 0 ? m_line_syntax_states_[change_start_line - 1] : SyntaxRule::kDefaultStateId;
     size_t total_line_count = m_document_->getLineCount();
     size_t line_start_index = m_document_->charIndexOfLine(change_start_line);
     size_t line = change_start_line;

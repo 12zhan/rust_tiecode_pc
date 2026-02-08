@@ -210,6 +210,38 @@ pub const JAVASCRIPT_GRAMMAR: &str = r##"{
   }
 }"##;
 
+pub const JAVA_GRAMMAR: &str = r##"{
+  "name": "Java",
+  "fileExtensions": [".java", ".jav"],
+  "styles": [
+    { "name": "keyword", "foreground": "#569cd6", "tags": ["bold"] },
+    { "name": "string", "foreground": "#ce9178" },
+    { "name": "comment", "foreground": "#6a9955" },
+    { "name": "number", "foreground": "#b5cea8" },
+    { "name": "type", "foreground": "#4ec9b0" },
+    { "name": "annotation", "foreground": "#dcdcaa" },
+    { "name": "function", "foreground": "#dcdcaa" }
+  ],
+  "states": {
+    "default": [
+      { "pattern": "//.*", "style": "comment" },
+      { "pattern": "/\\*", "state": "block_comment", "style": "comment" },
+      { "pattern": "\\\"(?:[^\\\"\\\\]|\\\\.)*\\\"", "style": "string" },
+      { "pattern": "'(?:[^'\\\\]|\\\\.)'", "style": "string" },
+      { "pattern": "@[a-zA-Z_][a-zA-Z0-9_]*", "style": "annotation" },
+      { "pattern": "\\b(?:abstract|assert|boolean|break|byte|case|catch|char|class|const|continue|default|do|double|else|enum|extends|final|finally|float|for|goto|if|implements|import|instanceof|int|interface|long|native|new|package|private|protected|public|return|short|static|strictfp|super|switch|synchronized|this|throw|throws|transient|try|void|volatile|while|true|false|null|var)\\b", "style": "keyword" },
+      { "pattern": "\\b[0-9]+(?:\\.[0-9]+)?f?\\b", "style": "number" },
+      { "pattern": "\\b0x[0-9a-fA-F]+\\b", "style": "number" },
+      { "pattern": "\\b[A-Z][a-zA-Z0-9_]*\\b", "style": "type" },
+      { "pattern": "\\b[a-zA-Z_][a-zA-Z0-9_]*(?=\\()", "style": "function" }
+    ],
+    "block_comment": [
+      { "pattern": "\\*/", "state": "default", "style": "comment" },
+      { "pattern": ".", "style": "comment" }
+    ]
+  }
+}"##;
+
 pub const TYPESCRIPT_GRAMMAR: &str = r##"{
   "name": "TypeScript",
   "fileExtensions": [".ts", ".tsx"],

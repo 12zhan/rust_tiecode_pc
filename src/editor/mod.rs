@@ -27,6 +27,7 @@ use crate::editor::grammar::{
     CMAKE_GRAMMAR,
     CSS_GRAMMAR,
     HTML_GRAMMAR,
+    JAVA_GRAMMAR,
     JAVASCRIPT_GRAMMAR,
     JIESHENG_GRAMMAR,
     JSON_GRAMMAR,
@@ -133,11 +134,57 @@ pub enum CodeEditorEvent {
 
 impl EventEmitter<CodeEditorEvent> for CodeEditor {}
 
+#[derive(Clone, Debug)]
+pub struct CodeLine {
+    pub shaped: ShapedLine,
+    pub map_orig_to_expanded: Vec<usize>,
+}
+
+impl CodeLine {
+    pub fn x_for_index(&self, index: usize) -> Pixels {
+        let expanded_index = if index >= self.map_orig_to_expanded.len() {
+             *self.map_orig_to_expanded.last().unwrap_or(&0)
+        } else {
+             self.map_orig_to_expanded[index]
+        };
+        self.shaped.x_for_index(expanded_index)
+    }
+
+    pub fn paint(
+        &self,
+        origin: Point<Pixels>,
+        line_height: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> anyhow::Result<()> {
+        self.shaped.paint(origin, line_height, window, cx)
+    }
+
+    pub fn index_for_x(&self, x: Pixels) -> Option<usize> {
+        let expanded_idx = self.shaped.index_for_x(x)?;
+        match self.map_orig_to_expanded.binary_search(&expanded_idx) {
+            Ok(i) => Some(i),
+            Err(i) => {
+                if i == 0 { return Some(0); }
+                if i >= self.map_orig_to_expanded.len() { return Some(self.map_orig_to_expanded.len() - 1); }
+                
+                let prev = self.map_orig_to_expanded[i - 1];
+                let next = self.map_orig_to_expanded[i];
+                if expanded_idx - prev < next - expanded_idx {
+                    Some(i - 1)
+                } else {
+                    Some(i)
+                }
+            }
+        }
+    }
+}
+
 pub struct CodeEditor {
     pub focus_handle: FocusHandle,
     pub core: EditorCore,
     pub layout: EditorLayout,
-    render_cache: Arc<Mutex<LruCache<String, ShapedLine>>>,
+    render_cache: Arc<Mutex<LruCache<String, CodeLine>>>,
     dragging_scrollbar: bool,
     drag_start_y: Option<Pixels>,
     scroll_start_y: Option<Pixels>,
@@ -181,6 +228,9 @@ impl CodeEditor {
         engine
             .compile_json(JAVASCRIPT_GRAMMAR)
             .expect("Failed to compile JavaScript grammar");
+        engine
+            .compile_json(JAVA_GRAMMAR)
+            .expect("Failed to compile Java grammar");
         engine
             .compile_json(TYPESCRIPT_GRAMMAR)
             .expect("Failed to compile TypeScript grammar");
@@ -1141,6 +1191,30 @@ impl CodeEditor {
         }
     }
 
+    fn expand_tabs(text: &str, tab_size: usize) -> (String, Vec<usize>) {
+        let mut expanded = String::with_capacity(text.len());
+        let mut map = Vec::with_capacity(text.len() + 1);
+        let mut col = 0;
+
+        for (_i, c) in text.char_indices() {
+             let len = c.len_utf8();
+             for _ in 0..len {
+                 map.push(expanded.len());
+             }
+
+             if c == '\t' {
+                 let count = tab_size - (col % tab_size);
+                 for _ in 0..count { expanded.push(' '); }
+                 col += count;
+             } else {
+                 expanded.push(c);
+                 col += 1;
+             }
+        }
+        map.push(expanded.len());
+        (expanded, map)
+    }
+
     fn get_cached_shape_line(
         &self,
         window: &Window,
@@ -1148,7 +1222,7 @@ impl CodeEditor {
         font_size: Pixels,
         line_index: usize,
         line_start_byte: usize,
-    ) -> ShapedLine {
+    ) -> CodeLine {
         let key = format!("{}:{}", line_index, text);
 
         if let Ok(mut cache) = self.render_cache.lock() {
@@ -1157,8 +1231,22 @@ impl CodeEditor {
             }
         }
 
+        let (expanded_text, map) = Self::expand_tabs(text, 4);
         let highlights = self.get_highlights_for_line(line_start_byte, text);
-        let line = Self::shape_code_line(window, text, font_size, &highlights);
+        
+        let mut expanded_highlights = Vec::new();
+        for (range, color) in highlights {
+             let start = map.get(range.start).cloned().unwrap_or(expanded_text.len());
+             let end = map.get(range.end).cloned().unwrap_or(expanded_text.len());
+             expanded_highlights.push((start..end, color));
+        }
+
+        let shaped = Self::shape_code_line(window, &expanded_text, font_size, &expanded_highlights);
+        
+        let line = CodeLine {
+             shaped,
+             map_orig_to_expanded: map,
+        };
 
         if let Ok(mut cache) = self.render_cache.lock() {
             cache.put(key, line.clone());
@@ -1221,40 +1309,75 @@ impl CodeEditor {
         let line_char_len = line_text.chars().count();
         let line_end_char = line_start_char + line_char_len;
 
-        for span in &self.cached_highlights {
+        // Binary search for the first span that ends after the line starts
+        let start_idx = self.cached_highlights.partition_point(|span| {
+            (span.end_index as usize) <= line_start_char
+        });
+
+        // Iterate through spans using a single pass over line characters
+        let mut char_indices = line_text.char_indices().peekable();
+        let mut current_char_idx = 0;
+        
+        for span in &self.cached_highlights[start_idx..] {
             let span_start_char = span.start_index as usize;
             let span_end_char = span.end_index as usize;
 
-            // Check intersection
+            if span_start_char >= line_end_char {
+                break;
+            }
+
+            // Intersection check
             if span_end_char > line_start_char && span_start_char < line_end_char {
                 let start_in_line_chars = span_start_char.max(line_start_char) - line_start_char;
                 let end_in_line_chars = span_end_char.min(line_end_char) - line_start_char;
 
                 if start_in_line_chars < end_in_line_chars {
-                    let start_byte =
-                        Self::byte_offset_for_char_offset(line_text, start_in_line_chars);
-                    let end_byte = Self::byte_offset_for_char_offset(line_text, end_in_line_chars);
-                    if start_byte < end_byte {
+                     // Find start_byte
+                     while current_char_idx < start_in_line_chars {
+                         char_indices.next();
+                         current_char_idx += 1;
+                     }
+                     let start_byte = char_indices.peek().map(|(b, _)| *b).unwrap_or(line_text.len());
+
+                     // Find end_byte
+                     while current_char_idx < end_in_line_chars {
+                         char_indices.next();
+                         current_char_idx += 1;
+                     }
+                     let end_byte = char_indices.peek().map(|(b, _)| *b).unwrap_or(line_text.len());
+
+                     if start_byte < end_byte {
                         if let Some(color) = self.style_cache.get(&span.style_id) {
                             result.push((start_byte..end_byte, *color));
                         }
-                    }
+                     }
                 }
             }
         }
 
-        result.sort_by(|a, b| a.0.start.cmp(&b.0.start));
-
-        let mut normalized = Vec::with_capacity(result.len());
+        // Result is already sorted by virtue of cached_highlights being sorted and sequential processing
+        // Merging adjacent same-colored spans if needed
+        let mut normalized: Vec<(Range<usize>, Hsla)> = Vec::with_capacity(result.len());
         let mut last_end = 0usize;
         let line_len = line_text.len();
+        
         for (range, color) in result {
             let mut start = range.start.min(line_len);
             let end = range.end.min(line_len);
+            
             if start < last_end {
                 start = last_end;
             }
             if start < end {
+                // Optimization: merge with previous if contiguous and same color
+                if let Some(last) = normalized.last_mut() {
+                    if last.0.end == start && last.1 == color {
+                        last.0.end = end;
+                        last_end = end;
+                        continue;
+                    }
+                }
+                
                 normalized.push((start..end, color));
                 last_end = end;
             }
@@ -1262,18 +1385,7 @@ impl CodeEditor {
         normalized
     }
 
-    fn byte_offset_for_char_offset(text: &str, char_offset: usize) -> usize {
-        if char_offset == 0 {
-            return 0;
-        }
-        if char_offset >= text.chars().count() {
-            return text.len();
-        }
-        text.char_indices()
-            .nth(char_offset)
-            .map(|(byte_idx, _)| byte_idx)
-            .unwrap_or(text.len())
-    }
+
 
     fn clamp_to_char_boundary(text: &str, idx: usize) -> usize {
         let idx = idx.min(text.len());

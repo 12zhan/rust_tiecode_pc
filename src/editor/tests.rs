@@ -151,6 +151,36 @@ mod tests {
     }
 
     #[test]
+    fn test_java_highlighting() {
+        use crate::editor::grammar::JAVA_GRAMMAR;
+        let engine = Engine::new(true);
+        let result = engine.compile_json(JAVA_GRAMMAR);
+        assert!(result.is_ok(), "Grammar compilation failed: {:?}", result.err());
+
+        let code = "public class Main {\n    public static void main(String[] args) {\n        System.out.println(\"Hello\");\n    }\n}";
+        let doc = Document::new("Main.java", code);
+        let analyzer = engine.load_document(&doc);
+        let raw_result = analyzer.analyze();
+        
+        let spans = DocumentAnalyzer::parse_result(&raw_result, false);
+
+        for span in spans {
+            let style_name = engine.get_style_name(span.style_id);
+            if let Some(name) = style_name {
+                let token = &code[span.start_index as usize..span.end_index as usize];
+                
+                if token == "public" || token == "class" || token == "static" || token == "void" {
+                    assert_eq!(name, "keyword", "Token '{}' should be keyword", token);
+                } else if token == "Main" || token == "String" || token == "System" {
+                    assert_eq!(name, "type", "Token '{}' should be type", token);
+                } else if token == "\"Hello\"" {
+                    assert_eq!(name, "string", "Token '{}' should be string", token);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_core_replace_range() {
         use crate::editor::core::EditorCore;
         use ropey::Rope;
@@ -178,5 +208,42 @@ mod tests {
         core.marked_range = Some(0..4);
         core.replace_range(4..4, "s");
         assert!(core.marked_range.is_none(), "marked_range should be cleared after replace_range");
+    }
+
+    #[test]
+    fn test_jiesheng_incremental_edit_crash() {
+        use crate::editor::grammar::JIESHENG_GRAMMAR;
+        let engine = Engine::new(true);
+        engine.compile_json(CPP_GRAMMAR).expect("Failed to compile CPP");
+        engine.compile_json(JIESHENG_GRAMMAR).expect("Failed to compile JIESHENG");
+
+        let code = "@code\nint main() {\n}\n@end";
+        let doc = Document::new("test_crash.t", code);
+        let analyzer = engine.load_document(&doc);
+        let _ = analyzer.analyze();
+
+        // Simulate inserting text inside the embedded C++ block
+        // Insert "    return 0;\n" inside main()
+        // Line 1 is "int main() {"
+        let start_line = 1;
+        let start_col = 12; // After '{'
+        let end_line = 1;
+        let end_col = 12;
+        let new_text = "\n    return 0;";
+
+        println!("Starting incremental analysis...");
+        let result = analyzer.analyze_incremental(start_line, start_col, end_line, end_col, new_text);
+        println!("Incremental analysis finished. Result size: {}", result.len());
+        
+        let spans = DocumentAnalyzer::parse_result(&result, false);
+        for span in spans {
+             let style_name = engine.get_style_name(span.style_id).unwrap_or_default();
+             let token = if span.start_line == 2 {
+                 "return" // approximated check
+             } else {
+                 ""
+             };
+             println!("Span line {}: {:?}", span.start_line, style_name);
+        }
     }
 }

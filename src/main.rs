@@ -25,6 +25,7 @@ use log::*;
 use image::GenericImageView;
 use std::fs;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 actions!(start_window, [ShowCommandPalette]);
 
@@ -516,8 +517,10 @@ impl StartWindow {
                 std::process::exit(0);
             }
             "view.set_background" => {
-                cx.spawn(|view: WeakEntity<StartWindow>, cx: &mut AsyncApp| {
+                let executor = cx.background_executor().clone();
+                cx.spawn(move |view: WeakEntity<StartWindow>, cx: &mut AsyncApp| {
                     let mut cx = cx.clone();
+                    let executor = executor.clone();
                     async move {
                         let task = rfd::AsyncFileDialog::new()
                             .add_filter("Image", &["png", "jpg", "jpeg", "webp"])
@@ -527,24 +530,33 @@ impl StartWindow {
                             let path = file.path().to_path_buf();
                             
                             // Optimization: Resize large images to reduce memory usage
-                            // 200MB+ memory usage is usually due to 4K+ textures.
-                            // Resizing to max 1920x1080 significantly reduces memory while keeping acceptable quality.
-                            let final_path = if let Ok(img) = image::open(&path) {
-                                let (width, height) = img.dimensions();
-                                if width > 1920 || height > 1080 {
-                                    let resized = img.resize(1920, 1080, image::imageops::FilterType::Lanczos3);
-                                    let temp_path = std::env::temp_dir().join("tiecode_bg_cache.jpg");
-                                    if let Ok(_) = resized.save(&temp_path) {
-                                        temp_path
+                            // Offload to background thread to avoid freezing UI
+                            let final_path = executor.spawn(async move {
+                                if let Ok(img) = image::open(&path) {
+                                    let (width, height) = img.dimensions();
+                                    if width > 1920 || height > 1080 {
+                                        // Use thumbnail for faster downscaling (integer scaling + bilinear)
+                                        let resized = img.thumbnail(1920, 1080);
+                                        
+                                        // Use unique filename to avoid Windows file locking issues
+                                        let timestamp = SystemTime::now()
+                                            .duration_since(UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_nanos();
+                                        let temp_path = std::env::temp_dir().join(format!("tiecode_bg_cache_{}.jpg", timestamp));
+                                        
+                                        if let Ok(_) = resized.save(&temp_path) {
+                                            temp_path
+                                        } else {
+                                            path
+                                        }
                                     } else {
                                         path
                                     }
                                 } else {
                                     path
                                 }
-                            } else {
-                                path
-                            };
+                            }).await;
 
                             view.update(&mut cx, |this: &mut StartWindow, cx: &mut Context<StartWindow>| {
                                 this.background_image = Some(final_path);

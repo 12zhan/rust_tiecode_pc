@@ -7,7 +7,7 @@ use crate::lsp::tiec::types::{
     CompilerOptions, CompletionParams, CursorParams, Position, SearchPrefixes,
 };
 use url::Url;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub struct LspPlugin {
     name: String,

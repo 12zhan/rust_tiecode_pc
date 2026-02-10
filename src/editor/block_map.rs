@@ -43,12 +43,17 @@ impl BlockMap {
     pub fn update(&mut self, text: &Rope, grammar_json: &str) {
         // Update pairs if grammar changed
         if self.last_grammar_ptr != grammar_json.as_ptr() {
-            if let Ok(config) = serde_json::from_str::<GrammarConfig>(grammar_json) {
-                self.pairs = config.block_pairs.into_iter()
-                    .map(|p| (p.start, p.end))
-                    .collect();
-            } else {
-                self.pairs.clear();
+            match serde_json::from_str::<GrammarConfig>(grammar_json) {
+                Ok(config) => {
+                    self.pairs = config.block_pairs.into_iter()
+                        .map(|p| (p.start, p.end))
+                        .collect();
+                    // println!("BlockMap: Loaded {} block pairs", self.pairs.len());
+                }
+                Err(_) => {
+                    // println!("BlockMap: Failed to parse grammar JSON: {}", e);
+                    self.pairs.clear();
+                }
             }
             self.last_grammar_ptr = grammar_json.as_ptr();
         }
@@ -80,16 +85,16 @@ impl BlockMap {
                 }
             }
 
-            // Push state before popping to include the end line in the block
-            let parent = stack.last().copied();
-            parents.push(parent);
-            depths.push(stack.len());
-
             if matched_end {
                 if let Some(start) = stack.pop() {
                     scopes.insert(start, i);
                 }
             }
+
+            // Record state after popping so the end line is not treated as inside the block.
+            let parent = stack.last().copied();
+            parents.push(parent);
+            depths.push(stack.len());
 
             let mut matched_start = false;
             for (start, _) in &self.pairs {

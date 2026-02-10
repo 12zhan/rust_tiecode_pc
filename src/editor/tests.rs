@@ -227,4 +227,27 @@ mod tests {
              println!("Span line {}: {:?}", span.start_line, style_name);
         }
     }
+
+    #[test]
+    fn test_block_map_jiesheng_scopes_and_depths() {
+        use crate::editor::block_map::BlockMap;
+        use crate::editor::grammar::JIESHENG_GRAMMAR;
+        use ropey::Rope;
+
+        let code = "类 A\n    方法 m\n        如果 x\n        结束 如果\n    结束 方法\n结束 类";
+        let rope = Rope::from(code);
+
+        let mut map = BlockMap::new();
+        map.update(&rope, JIESHENG_GRAMMAR);
+
+        assert_eq!(map.depths.as_ref().as_slice(), &[0, 1, 2, 2, 1, 0]);
+        assert_eq!(
+            map.parents.as_ref().as_slice(),
+            &[None, Some(0), Some(1), Some(1), Some(0), None]
+        );
+
+        assert_eq!(map.scopes.as_ref().get(&0).copied(), Some(5));
+        assert_eq!(map.scopes.as_ref().get(&1).copied(), Some(4));
+        assert_eq!(map.scopes.as_ref().get(&2).copied(), Some(3));
+    }
 }

@@ -2,7 +2,7 @@ use std::ffi::{CStr, CString};
 use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use libc::c_char;
-use log::{debug, info, warn};
+use log::{debug, info};
 use super::{TiecLib, RawHandle, TcError};
 use super::types::*;
 

@@ -182,6 +182,83 @@ impl CodeLine {
     }
 }
 
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[derive(Clone, Debug)]
+pub enum IndentGuideHighlightColor {
+    Single(Rgba),
+    Palette(Vec<Rgba>),
+}
+
+#[derive(Clone, Debug)]
+pub struct IndentGuideHighlightConfig {
+    pub enabled: bool,
+    pub animate: bool,
+    pub animation_duration: Duration,
+    pub colors: IndentGuideHighlightColor,
+    pub randomize_palette: bool,
+}
+
+impl Default for IndentGuideHighlightConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            animate: true,
+            animation_duration: Duration::from_millis(400),
+            colors: IndentGuideHighlightColor::Single(rgb(0x4ec9b0)),
+            randomize_palette: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct IndentGuideThickness {
+    pub normal: Pixels,
+    pub highlighted: Pixels,
+}
+
+impl Default for IndentGuideThickness {
+    fn default() -> Self {
+        Self {
+            normal: px(1.0),
+            highlighted: px(1.5),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct IndentGuideConfig {
+    pub enabled: bool,
+    pub guide_color: Rgba,
+    pub click_hit_threshold: Pixels,
+    pub thickness: IndentGuideThickness,
+    pub highlight: IndentGuideHighlightConfig,
+}
+
+impl Default for IndentGuideConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            guide_color: rgba(0x80808033),
+            click_hit_threshold: px(6.0),
+            thickness: IndentGuideThickness::default(),
+            highlight: IndentGuideHighlightConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BlockHighlightState {
+    pub start_line: usize,
+    pub end_line: usize,
+    pub depth: usize,
+    pub trigger_line: usize,
+    pub start_time: Instant,
+    pub animate: bool,
+    pub animation_duration: Duration,
+    pub color: Rgba,
+}
+
 pub struct CodeEditor {
     pub focus_handle: FocusHandle,
     pub core: EditorCore,
@@ -202,6 +279,9 @@ pub struct CodeEditor {
     pub git_diff_map: HashMap<usize, GitDiffStatus>,
     pub git_base_content: Option<String>,
     pub block_map: BlockMap,
+    pub block_highlight: Option<BlockHighlightState>,
+    pub indent_guides: IndentGuideConfig,
+    indent_guides_rng: u64,
 }
 
 impl CodeEditor {
@@ -278,6 +358,9 @@ impl CodeEditor {
             git_diff_map: HashMap::new(),
             git_base_content: None,
             block_map: BlockMap::new(),
+            block_highlight: None,
+            indent_guides: IndentGuideConfig::default(),
+            indent_guides_rng: Self::seed_indent_guides_rng(),
         };
 
         editor.init_lsp_and_spawn_loop(cx);
@@ -285,6 +368,45 @@ impl CodeEditor {
         editor.sync_sweetline_document(cx); // Trigger block map update
 
         editor
+    }
+
+    fn seed_indent_guides_rng() -> u64 {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        nanos ^ 0x9e37_79b9_7f4a_7c15
+    }
+
+    fn next_xorshift64(state: &mut u64) -> u64 {
+        let mut x = *state;
+        if x == 0 {
+            x = Self::seed_indent_guides_rng();
+        }
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    fn pick_indent_guide_highlight_color(
+        cfg: &IndentGuideHighlightConfig,
+        rng_state: &mut u64,
+    ) -> Rgba {
+        match &cfg.colors {
+            IndentGuideHighlightColor::Single(color) => color.clone(),
+            IndentGuideHighlightColor::Palette(colors) => {
+                if colors.is_empty() {
+                    rgb(0x4ec9b0)
+                } else if cfg.randomize_palette && colors.len() > 1 {
+                    let idx = (Self::next_xorshift64(rng_state) as usize) % colors.len();
+                    colors[idx].clone()
+                } else {
+                    colors[0].clone()
+                }
+            }
+        }
     }
 
     fn init_lsp_and_spawn_loop(&mut self, _cx: &mut Context<Self>) {
@@ -2038,12 +2160,215 @@ impl CodeEditor {
         }
     }
 
+    fn spawn_block_highlight_animation(
+        &mut self,
+        start_time: Instant,
+        duration: Duration,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(move |entity: WeakEntity<CodeEditor>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let frame = Duration::from_millis(16);
+                let deadline = start_time + duration;
+
+                while Instant::now() < deadline {
+                    cx.background_executor().timer(frame).await;
+                    let still_active = match entity.update(&mut cx, |this, cx| {
+                        let still_active = this
+                            .block_highlight
+                            .as_ref()
+                            .map(|s| s.start_time == start_time)
+                            .unwrap_or(false);
+                        if still_active {
+                            cx.notify();
+                        }
+                        still_active
+                    }) {
+                        Ok(still_active) => still_active,
+                        Err(_) => break,
+                    };
+
+                    if !still_active {
+                        break;
+                    }
+                }
+
+                // Ensure the final state is rendered.
+                let _ = entity.update(&mut cx, |this, cx| {
+                    let still_active = this
+                        .block_highlight
+                        .as_ref()
+                        .map(|s| s.start_time == start_time)
+                        .unwrap_or(false);
+                    if still_active {
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Check Block Indent Line Click / Line Highlight
+        if !event.modifiers.shift
+            && !event.modifiers.alt
+            && !event.modifiers.control
+            && !event.modifiers.platform
+            && self.indent_guides.enabled
+            && self.indent_guides.highlight.enabled
+        {
+            if let Some(bounds) = self.layout.last_bounds {
+                 let font_size = self.layout.font_size;
+                 // Use CodeEditor::shape_line for consistency
+                 let space_width = CodeEditor::shape_line(window, " ", rgb(0x000000).into(), font_size).width;
+                 let indent_width = space_width * 4.0;
+                 
+                 let line_count = self.core.content.len_lines().max(1);
+                 let max_digits = line_count.to_string().len();
+                 let text_x = self.layout.text_x(bounds, max_digits);
+                 
+                 // println!("Click at {:?}, text_x: {:?}, indent_width: {:?}", event.position, text_x, indent_width);
+
+                 // Only handle clicks in the text area (exclude gutter and scrollbar).
+                 let text_area_left = bounds.left() + self.layout.gutter_width(max_digits);
+                 let scrollbar_left = bounds.right() - self.layout.scrollbar_width();
+                 if event.position.x >= text_area_left && event.position.x < scrollbar_left {
+                     let y = event.position.y;
+                     let mut line_index = self.layout.line_index_for_y(bounds, y);
+                     if line_index >= line_count {
+                         line_index = line_count.saturating_sub(1);
+                     }
+                     
+                     // println!("Line index: {}", line_index);
+
+                     if let Some(depth) = self.block_map.depths.get(line_index).copied() {
+                         // 1) Precise guide-line click (supports choosing nested blocks by level).
+                         if depth > 0 {
+                             let mut best_level: Option<usize> = None;
+                             let mut best_dist: f32 = f32::INFINITY;
+                             for level in 1..=depth {
+                                 let line_x = text_x + indent_width * (level as f32 - 1.0);
+                                 let dist = (event.position.x - line_x).abs();
+                                 let dist_f = f32::from(dist);
+                                 if dist_f < best_dist {
+                                     best_dist = dist_f;
+                                     best_level = Some(level);
+                                 }
+                             }
+
+                             let hit_threshold = self.indent_guides.click_hit_threshold;
+                             if let Some(level) = best_level {
+                                 if best_dist < f32::from(hit_threshold) {
+                                     // Find the block that corresponds to this indent level.
+                                     let steps = depth.saturating_sub(level);
+                                     let mut curr_start =
+                                         self.block_map.parents.get(line_index).and_then(|x| *x);
+
+                                     for _ in 0..steps {
+                                         if let Some(s) = curr_start {
+                                             curr_start =
+                                                 self.block_map.parents.get(s).and_then(|x| *x);
+                                         } else {
+                                             break;
+                                         }
+                                     }
+
+                                      if let Some(start) = curr_start {
+                                          if let Some(end) = self.block_map.scopes.get(&start) {
+                                              let start_time = Instant::now();
+                                              let highlight_cfg = &self.indent_guides.highlight;
+                                              let animate = highlight_cfg.animate;
+                                              let duration = highlight_cfg.animation_duration;
+                                              let color = Self::pick_indent_guide_highlight_color(
+                                                  highlight_cfg,
+                                                  &mut self.indent_guides_rng,
+                                              );
+                                              self.block_highlight = Some(BlockHighlightState {
+                                                  start_line: start,
+                                                  end_line: *end,
+                                                  depth: level,
+                                                  trigger_line: line_index,
+                                                  start_time,
+                                                  animate,
+                                                  animation_duration: duration,
+                                                  color,
+                                              });
+                                              if animate && !duration.is_zero() {
+                                                  self.spawn_block_highlight_animation(
+                                                      start_time, duration, cx,
+                                                  );
+                                              }
+                                              cx.notify();
+                                              return;
+                                          }
+                                      }
+                                 }
+                             }
+                         }
+
+                         // 2) Line click: highlight the most relevant block for this line even if
+                         // the user didn't click exactly on the 1px guide line.
+                         let mut target_start: Option<usize> = None;
+                         let mut target_end: Option<usize> = None;
+                         let mut target_level: Option<usize> = None;
+
+                         // Prefer highlighting the block that starts on this line.
+                         if let Some(end) = self.block_map.scopes.get(&line_index) {
+                             target_start = Some(line_index);
+                             target_end = Some(*end);
+                             target_level = Some(depth + 1);
+                         } else if depth > 0 {
+                             // Otherwise highlight the innermost block that contains this line.
+                             if let Some(start) =
+                                 self.block_map.parents.get(line_index).and_then(|x| *x)
+                             {
+                                 if let Some(end) = self.block_map.scopes.get(&start) {
+                                     target_start = Some(start);
+                                     target_end = Some(*end);
+                                     target_level = Some(depth);
+                                 }
+                             }
+                         }
+
+                          if let (Some(start), Some(end), Some(level)) =
+                              (target_start, target_end, target_level)
+                          {
+                              let start_time = Instant::now();
+                              let highlight_cfg = &self.indent_guides.highlight;
+                              let animate = highlight_cfg.animate;
+                              let duration = highlight_cfg.animation_duration;
+                              let color = Self::pick_indent_guide_highlight_color(
+                                  highlight_cfg,
+                                  &mut self.indent_guides_rng,
+                              );
+                              self.block_highlight = Some(BlockHighlightState {
+                                  start_line: start,
+                                  end_line: end,
+                                  depth: level,
+                                  trigger_line: line_index,
+                                  start_time,
+                                  animate,
+                                  animation_duration: duration,
+                                  color,
+                              });
+                              if animate && !duration.is_zero() {
+                                  self.spawn_block_highlight_animation(start_time, duration, cx);
+                              }
+                              cx.notify();
+                              // Don't return: allow normal cursor placement/selection to proceed.
+                          }
+                      }
+                  }
+            }
+        }
+
         // Check scrollbar
         if let Some(bounds) = self.layout.last_bounds {
             let content_height = self.layout.content_height(self.core.content.len_lines());
@@ -2216,6 +2541,8 @@ pub fn code_editor_canvas(
                 hover_popup,
                 git_diff_map,
                 block_map,
+                block_highlight,
+                indent_guides,
             ) = {
                 let state = editor.read(cx);
                 (
@@ -2229,6 +2556,8 @@ pub fn code_editor_canvas(
                     state.hover_popup.clone(),
                     state.git_diff_map.clone(),
                     state.block_map.clone(),
+                    state.block_highlight.clone(),
+                    state.indent_guides.clone(),
                 )
             };
 
@@ -2369,34 +2698,112 @@ pub fn code_editor_canvas(
                         bounds: text_area_bounds,
                     }),
                     |window| {
-                         let space_width = window.text_system().shape_line(
-                            SharedString::from(" "),
+                        if !indent_guides.enabled {
+                            return;
+                        }
+
+                        let space_width = CodeEditor::shape_line(
+                            window,
+                            " ",
+                            rgb(0x000000).into(),
                             font_size,
-                            &[TextRun {
-                                len: 1,
-                                font: window.text_style().font(),
-                                color: Hsla::default(),
-                                background_color: None,
-                                underline: None,
-                                strikethrough: None,
-                            }],
-                            None,
-                        ).width;
-                        
+                        )
+                        .width;
+
                         let indent_width = space_width * 4.0;
-                        let guide_color = hsla(0.0, 0.0, 0.5, 0.2); // Subtle grey with opacity
+                        let guide_color = indent_guides.guide_color;
+                        let normal_thickness = indent_guides.thickness.normal;
+                        let highlighted_thickness = indent_guides.thickness.highlighted;
+
+                        // Calculate animation progress if active.
+                        let (
+                            highlight_active,
+                            anim_progress,
+                            active_depth,
+                            active_start,
+                            active_end,
+                            active_trigger,
+                            highlight_color,
+                        ) = if indent_guides.highlight.enabled {
+                            if let Some(state) = &block_highlight {
+                                let progress = if state.animate && !state.animation_duration.is_zero()
+                                {
+                                    let elapsed = state.start_time.elapsed().as_secs_f32();
+                                    let duration = state.animation_duration.as_secs_f32();
+                                    if duration > 0.0 {
+                                        (elapsed / duration).min(1.0)
+                                    } else {
+                                        1.0
+                                    }
+                                } else {
+                                    1.0
+                                };
+                                (
+                                    true,
+                                    progress,
+                                    state.depth,
+                                    state.start_line,
+                                    state.end_line,
+                                    state.trigger_line,
+                                    state.color.clone(),
+                                )
+                            } else {
+                                (false, 0.0, 0, 0, 0, 0, rgb(0x4ec9b0))
+                            }
+                        } else {
+                            (false, 0.0, 0, 0, 0, 0, rgb(0x4ec9b0))
+                        };
 
                         for i in start_line..end_line {
                             if let Some(depth) = block_map.depths.get(i) {
-                                for level in 0..*depth {
-                                    let x = text_x + indent_width * level as f32;
+                                for level in 1..=*depth {
+                                    let x = text_x + indent_width * (level as f32 - 1.0);
                                     let y = layout.line_y(bounds, i);
                                     
+                                    // Check if this segment should be highlighted
+                                    let is_highlighted =
+                                        highlight_active && level == active_depth && i >= active_start && i <= active_end;
+                                    
+                                    let color = if is_highlighted {
+                                        // Animation logic: expand from trigger_line towards start and end.
+                                        // After the animation completes, keep the entire block highlighted.
+                                        if anim_progress >= 1.0 {
+                                            highlight_color.clone()
+                                        } else {
+                                            let trigger_f = active_trigger as f32;
+                                            let i_f = i as f32;
+
+                                            let up_dist = (active_trigger.saturating_sub(active_start)) as f32;
+                                            let down_dist = (active_end.saturating_sub(active_trigger)) as f32;
+
+                                            let current_up = up_dist * anim_progress;
+                                            let current_down = down_dist * anim_progress;
+
+                                            if i_f >= (trigger_f - current_up)
+                                                && i_f <= (trigger_f + current_down)
+                                            {
+                                                highlight_color.clone()
+                                            } else {
+                                                guide_color
+                                            }
+                                        }
+                                    } else {
+                                        guide_color
+                                    };
+
+                                    let thickness = if is_highlighted && color != guide_color {
+                                        highlighted_thickness
+                                    } else {
+                                        normal_thickness
+                                    };
+                                    let center_x = x + normal_thickness / 2.0;
+                                    let left_x = center_x - thickness / 2.0;
+                                    let right_x = center_x + thickness / 2.0;
                                     let segment_bounds = Bounds::from_corners(
-                                        point(x, y),
-                                        point(x + px(1.0), y + line_height)
+                                        point(left_x, y),
+                                        point(right_x, y + line_height),
                                     );
-                                    window.paint_quad(fill(segment_bounds, guide_color));
+                                    window.paint_quad(fill(segment_bounds, color));
                                 }
                             }
                         }

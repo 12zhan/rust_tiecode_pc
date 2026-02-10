@@ -5,8 +5,8 @@ pub mod wrapper;
 #[cfg(test)]
 mod test;
 
-use libc::{c_char, c_void, intptr_t};
-use libloading::{Library, Symbol};
+use libc::{c_char, intptr_t};
+use libloading::Library;
 
 pub type RawHandle = intptr_t;
 

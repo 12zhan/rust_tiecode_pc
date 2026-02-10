@@ -19,6 +19,7 @@ use component::{
 use editor::{
     Backspace, CodeEditor, CodeEditorEvent, Copy, CtrlShiftTab, Cut, Delete, DeleteLine, Down, Enter, Escape,
     FindNext, FindPrev, GoToDefinition, FormatDocument, SignatureHelp, Left, Paste, Redo, Right, SelectAll, ShiftTab, Tab, ToggleFind, Undo, Up,
+    IndentGuideHighlightColor,
 };
 use plugin::manager::PluginManager;
 use tiecode_plugin_api::CommandContribution;
@@ -168,10 +169,23 @@ fn main() {
             },
             |_, cx| {
                 let editor = cx.new(|cx| CodeEditor::new(cx, None));
+                editor.update(cx, |editor, _cx| {
+                    // Indent guides: disable animation + bold, enable colorful palette.
+                    editor.indent_guides.highlight.animate = false;
+                    editor.indent_guides.thickness.highlighted = editor.indent_guides.thickness.normal;
+                    editor.indent_guides.highlight.colors = IndentGuideHighlightColor::Palette(vec![
+                        rgb(0x4ec9b0),
+                        rgb(0x569cd6),
+                        rgb(0xc586c0),
+                        rgb(0xdcdcaa),
+                        rgb(0xce9178),
+                    ]);
+                    editor.indent_guides.highlight.randomize_palette = true;
+                });
                 /* editor.update(cx, |editor, cx| {
-                    if editor.core.content.len_bytes() != 0 {
-                        return;
-                    }
+                     if editor.core.content.len_bytes() != 0 {
+                         return;
+                     }
 
                     let sample = "类 启动类\n{\n    方法 启动方法()\n    {\n        变量 list: 列表<文本> = 新建 列表<文本>()\n        list.\n    }\n}\n";
                     editor.set_content(sample.to_string(), cx);

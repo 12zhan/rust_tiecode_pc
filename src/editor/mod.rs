@@ -12,6 +12,7 @@ use url::Url;
 
 // Value and Url removed
 
+pub mod block_map;
 pub mod completion;
 pub mod core;
 pub mod grammar;
@@ -22,6 +23,7 @@ pub mod undo;
 #[cfg(test)]
 mod tests;
 
+use crate::editor::block_map::BlockMap;
 use crate::editor::grammar::{
     CPP_GRAMMAR,
     CMAKE_GRAMMAR,
@@ -199,6 +201,7 @@ pub struct CodeEditor {
     completion_scroll_offset: f32,
     pub git_diff_map: HashMap<usize, GitDiffStatus>,
     pub git_base_content: Option<String>,
+    pub block_map: BlockMap,
 }
 
 impl CodeEditor {
@@ -274,10 +277,12 @@ impl CodeEditor {
             completion_scroll_offset: 0.0,
             git_diff_map: HashMap::new(),
             git_base_content: None,
+            block_map: BlockMap::new(),
         };
 
         editor.init_lsp_and_spawn_loop(cx);
         editor.fetch_git_base_content(cx);
+        editor.sync_sweetline_document(cx); // Trigger block map update
 
         editor
     }
@@ -1260,6 +1265,13 @@ impl CodeEditor {
     fn sync_sweetline_document(&mut self, cx: &mut Context<Self>) {
         let text = self.core.content.to_string();
 
+        // Update Block Map
+        if self.lsp_manager.doc_uri.ends_with(".t") {
+            self.block_map.update(&self.core.content, JIESHENG_GRAMMAR);
+        } else {
+            self.block_map.update(&self.core.content, "{}");
+        }
+
         let _ = self.sweetline_engine.remove_document(&self.lsp_manager.doc_uri);
         self.sweetline_analyzer = None;
         self.sweetline_document = None;
@@ -2203,6 +2215,7 @@ pub fn code_editor_canvas(
                 decorations,
                 hover_popup,
                 git_diff_map,
+                block_map,
             ) = {
                 let state = editor.read(cx);
                 (
@@ -2215,6 +2228,7 @@ pub fn code_editor_canvas(
                     state.decorations.clone(),
                     state.hover_popup.clone(),
                     state.git_diff_map.clone(),
+                    state.block_map.clone(),
                 )
             };
 
@@ -2348,6 +2362,46 @@ pub fn code_editor_canvas(
                          window.paint_quad(fill(indicator_bounds, color));
                     }
                 }
+
+                // 2.5 Draw Block Indent Lines
+                window.with_content_mask(
+                    Some(ContentMask {
+                        bounds: text_area_bounds,
+                    }),
+                    |window| {
+                         let space_width = window.text_system().shape_line(
+                            SharedString::from(" "),
+                            font_size,
+                            &[TextRun {
+                                len: 1,
+                                font: window.text_style().font(),
+                                color: Hsla::default(),
+                                background_color: None,
+                                underline: None,
+                                strikethrough: None,
+                            }],
+                            None,
+                        ).width;
+                        
+                        let indent_width = space_width * 4.0;
+                        let guide_color = hsla(0.0, 0.0, 0.5, 0.2); // Subtle grey with opacity
+
+                        for i in start_line..end_line {
+                            if let Some(depth) = block_map.depths.get(i) {
+                                for level in 0..*depth {
+                                    let x = text_x + indent_width * level as f32;
+                                    let y = layout.line_y(bounds, i);
+                                    
+                                    let segment_bounds = Bounds::from_corners(
+                                        point(x, y),
+                                        point(x + px(1.0), y + line_height)
+                                    );
+                                    window.paint_quad(fill(segment_bounds, guide_color));
+                                }
+                            }
+                        }
+                    }
+                );
 
                 // 3. Draw Text Area
                 window.with_content_mask(

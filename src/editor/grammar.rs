@@ -428,6 +428,12 @@ pub const JIESHENG_GRAMMAR: &str = r##"{
     "embedCodeRefThis": "(#)(this)",
     "embedCodeRefClass": "(#)(cls|ncls)(<)(${identifier})(>)"
   },
+  "blockPairs": [
+    { "start": "类", "end": "结束 类" },
+    { "start": "方法", "end": "结束 方法" },
+    { "start": "循环", "end": "结束 循环" },
+    { "start": "如果", "end": "结束 如果" }
+  ],
   "states": {
     "default": [
       {

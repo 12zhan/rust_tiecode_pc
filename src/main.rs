@@ -3,6 +3,7 @@
 mod component;
 mod editor;
 mod plugin;
+mod lsp;
 mod panic_handler;
 
 //DEMO
@@ -83,7 +84,22 @@ fn default_assets_base() -> PathBuf {
 
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
+
+#[cfg(windows)]
+mod windows_console {
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn SetConsoleOutputCP(wCodePageID: u32) -> i32;
+    }
+}
+
 fn main() {
+    #[cfg(windows)]
+    unsafe {
+        // Set console output code page to UTF-8 (65001) to fix garbled Chinese logs
+        windows_console::SetConsoleOutputCP(65001);
+    }
+
     panic_handler::init();
     env_logger::init();
 
@@ -151,7 +167,7 @@ fn main() {
                 ..WindowOptions::default()
             },
             |_, cx| {
-                let editor = cx.new(CodeEditor::new);
+                let editor = cx.new(|cx| CodeEditor::new(cx, None));
                 /* editor.update(cx, |editor, cx| {
                     if editor.core.content.len_bytes() != 0 {
                         return;

@@ -59,6 +59,9 @@ impl LspManager {
                     return parent.to_path_buf();
                 }
             }
+            if ancestor.join(".git").exists() {
+                return ancestor.to_path_buf();
+            }
         }
         
         // Fallback: use file's directory if no better root found
@@ -103,6 +106,15 @@ impl LspManager {
     }
 
     pub fn initialize(&mut self, content: &str) {
+        if self.root_uri.is_empty() {
+            if let Ok(url) = Url::parse(&self.doc_uri) {
+                if let Ok(path) = url.to_file_path() {
+                    let root = Self::detect_project_root(&path);
+                    self.root_uri = default_doc_uri(&root);
+                }
+            }
+        }
+
         let root_uri = self.root_uri.clone();
         let doc_uri = self.doc_uri.clone();
         if let Some(plugin) = self.ensure_plugin() {
@@ -135,10 +147,10 @@ impl LspManager {
         }
     }
 
-    pub fn completion(&mut self, line: usize, character: usize) -> Option<Vec<CompletionItem>> {
+    pub fn completion(&mut self, line: usize, character: usize, index: usize, prefix: &str, trigger_char: &str) -> Option<Vec<CompletionItem>> {
         let doc_uri = self.doc_uri.clone();
         if let Some(plugin) = self.ensure_plugin() {
-            match plugin.completion(&doc_uri, line, character) {
+            match plugin.completion(&doc_uri, line, character, index, prefix, trigger_char) {
                 Ok(value) => {
                     if let Some(items) = value.get("items").and_then(|i: &serde_json::Value| i.as_array()) {
                         let result = items.iter().filter_map(|item: &serde_json::Value| {
@@ -149,7 +161,7 @@ impl LspManager {
                                  6 => CompletionKind::Variable,
                                  7 => CompletionKind::Class,
                                  14 => CompletionKind::Keyword,
-                                 _ => CompletionKind::Text,
+                  _ => CompletionKind::Text,
                              };
                              let detail = item.get("detail").and_then(|s: &serde_json::Value| s.as_str()).unwrap_or("").to_string();
                              
@@ -168,5 +180,51 @@ impl LspManager {
             }
         }
         None
+    }
+
+    pub fn hover(&mut self, line: usize, character: usize, index: usize) -> Option<String> {
+        let doc_uri = self.doc_uri.clone();
+        if let Some(plugin) = self.ensure_plugin() {
+            match plugin.hover(&doc_uri, line, character, index) {
+                Ok(value) => {
+                    // Expecting HoverResult { kind, text }
+                    if let Some(text) = value.get("text").and_then(|s| s.as_str()) {
+                        return Some(text.to_string());
+                    }
+                }
+                Err(err) => {
+                    warn!("LSP plugin hover failed: {err}");
+                }
+            }
+        }
+        None
+    }
+
+    pub fn notify_create_file(&mut self, path: &Path, content: &str) {
+        let uri = default_doc_uri(path);
+        if let Some(plugin) = self.ensure_plugin() {
+            if let Err(err) = plugin.did_create_file(&uri, content) {
+                warn!("LSP plugin didCreateFile failed: {err}");
+            }
+        }
+    }
+
+    pub fn notify_delete_file(&mut self, path: &Path) {
+        let uri = default_doc_uri(path);
+        if let Some(plugin) = self.ensure_plugin() {
+            if let Err(err) = plugin.did_delete_file(&uri) {
+                warn!("LSP plugin didDeleteFile failed: {err}");
+            }
+        }
+    }
+
+    pub fn notify_rename_file(&mut self, old_path: &Path, new_path: &Path) {
+        let old_uri = default_doc_uri(old_path);
+        let new_uri = default_doc_uri(new_path);
+        if let Some(plugin) = self.ensure_plugin() {
+            if let Err(err) = plugin.did_rename_file(&old_uri, &new_uri) {
+                warn!("LSP plugin didRenameFile failed: {err}");
+            }
+        }
     }
 }

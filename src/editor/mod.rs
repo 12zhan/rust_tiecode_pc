@@ -202,7 +202,7 @@ pub struct CodeEditor {
 }
 
 impl CodeEditor {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(cx: &mut Context<Self>, file_path: Option<PathBuf>) -> Self {
         let engine = Arc::new(Engine::new(true));
         engine
             .compile_json(CPP_GRAMMAR)
@@ -250,7 +250,7 @@ impl CodeEditor {
             .compile_json(JIESHENG_GRAMMAR)
             .expect("Failed to compile 结绳 grammar");
 
-        let default_path = std::env::current_dir().unwrap_or_default().join("test.t");
+        let default_path = file_path.unwrap_or_else(|| std::env::temp_dir().join("untitled.t"));
         let doc_uri = default_doc_uri(&default_path);
         let doc = Document::new(&doc_uri, "");
         let analyzer = engine.load_document(&doc);
@@ -458,8 +458,9 @@ impl CodeEditor {
         // Clean up old document
         let _ = self.sweetline_engine.remove_document(&self.lsp_manager.doc_uri);
         
-        self.lsp_manager.doc_uri = new_uri;
-        self.lsp_manager.version = 1;
+        // Register new file with LSP
+        self.lsp_manager.update_doc_uri(new_uri, &content);
+        
         self.core.content = Rope::from(content.clone());
         self.core.set_cursor(0);
         self.decorations.clear();
@@ -636,7 +637,7 @@ impl CodeEditor {
                 let line_start_byte = content.line_to_byte(line_idx);
                 let char_idx = content.byte_to_char(cursor).saturating_sub(content.byte_to_char(line_start_byte));
 
-                if let Some(mut items) = self.lsp_manager.completion(line_idx, char_idx) {
+                if let Some(mut items) = self.lsp_manager.completion(line_idx, char_idx, cursor, &prefix, "") {
                     items.retain(|item| item.label.starts_with(&prefix));
                     
                     if !items.is_empty() {
